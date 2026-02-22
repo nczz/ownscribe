@@ -11,7 +11,14 @@ from pathlib import Path
 import click
 
 from ownscribe.config import DiarizationConfig, TranscriptionConfig
-from ownscribe.progress import NullProgress, ProgressWriter
+from ownscribe.progress import (
+    DownloadProgressEvent,
+    DownloadProgressWriter,
+    NullProgress,
+    ProgressWriter,
+    download_event_fraction,
+    format_download_progress,
+)
 from ownscribe.transcription.base import Transcriber
 from ownscribe.transcription.models import Segment, TranscriptResult, Word
 
@@ -31,6 +38,8 @@ class WhisperXTranscriber(Transcriber):
         self._diar_config = diarization_config
         self._progress = progress or NullProgress()
         self._model = None
+        self._align_models: dict[str, tuple[object, object]] = {}
+        self._diarize_model = None
 
     def _load_model(self):
         import whisperx
@@ -44,6 +53,127 @@ class WhisperXTranscriber(Transcriber):
             language=self._tx_config.language or None,
         )
 
+    def _configure_runtime_env(self) -> None:
+        os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+        if self._diar_config is None or not self._diar_config.telemetry:
+            os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+            os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "0")
+
+    def _set_detail(self, key: str, text: str | None) -> None:
+        set_detail = getattr(self._progress, "set_detail", None)
+        if callable(set_detail):
+            set_detail(key, text)
+
+    def _set_prepare_detail(self, text: str | None) -> None:
+        self._set_detail("preparing_models", text)
+
+    def _on_download_progress(self, step_key: str, stage_label: str, event: DownloadProgressEvent) -> None:
+        fraction = download_event_fraction(event)
+        if fraction is not None:
+            self._progress.update(step_key, fraction)
+        formatted = format_download_progress(event, include_percent=fraction is None)
+        if formatted:
+            self._set_detail(step_key, f"{stage_label}: {formatted}")
+        elif fraction is None and event.percent is not None:
+            self._set_detail(step_key, f"{stage_label}: {int(event.percent)}%")
+
+    def _capture_download_output(self, step_key: str, stage_label: str, fn, *args, **kwargs):
+        writer = DownloadProgressWriter(
+            lambda event: self._on_download_progress(step_key, stage_label, event)
+        )
+        self._progress.update(step_key, 0.0)
+        self._set_detail(step_key, stage_label)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(contextlib.redirect_stdout(writer))
+            stack.enter_context(contextlib.redirect_stderr(writer))
+            result = fn(*args, **kwargs)
+        writer.flush()
+        return result
+
+    def _capture_prep_output(self, stage_label: str, fn, *args, **kwargs):
+        return self._capture_download_output("preparing_models", stage_label, fn, *args, **kwargs)
+
+    def _prepare_transcription_models(
+        self,
+        *,
+        language: str | None,
+        step_key: str,
+        show_deferred_align_note: bool = False,
+    ) -> None:
+        if self._model is None:
+            self._capture_download_output(
+                step_key,
+                f"Loading Whisper model ({self._tx_config.model})",
+                self._load_model,
+            )
+
+        if language:
+            self._load_align_model(language, step_key=step_key)
+        elif show_deferred_align_note:
+            self._set_detail(
+                step_key,
+                "Whisper model ready. Alignment model will load after language detection.",
+            )
+
+    def _load_align_model(self, language: str, *, step_key: str = "preparing_models") -> tuple[object, object]:
+        import whisperx
+
+        if language in self._align_models:
+            return self._align_models[language]
+
+        align_model, align_metadata = self._capture_download_output(
+            step_key,
+            f"Loading alignment model ({language})",
+            whisperx.load_align_model,
+            language_code=language,
+            device="cpu",
+        )
+        self._align_models[language] = (align_model, align_metadata)
+        return align_model, align_metadata
+
+    def _load_diarization_pipeline(self, *, step_key: str = "preparing_models"):
+        from whisperx.diarize import DiarizationPipeline
+
+        if self._diarize_model is not None:
+            return self._diarize_model
+
+        device = self._resolve_diarization_device(self._diar_config.device)
+        self._diarize_model = self._capture_download_output(
+            step_key,
+            "Loading diarization pipeline",
+            DiarizationPipeline,
+            use_auth_token=self._diar_config.hf_token,
+            device=device,
+        )
+        return self._diarize_model
+
+    def prepare_models(self, language: str | None = None) -> None:
+        self._configure_runtime_env()
+        progress = self._progress
+        progress.begin("preparing_models")
+        try:
+            if self._model is not None:
+                self._set_prepare_detail(f"Whisper model ready ({self._tx_config.model})")
+
+            align_language = language or self._tx_config.language or None
+            self._prepare_transcription_models(
+                language=align_language,
+                step_key="preparing_models",
+                show_deferred_align_note=True,
+            )
+
+            if (
+                self._diar_config
+                and self._diar_config.enabled
+                and self._diar_config.hf_token
+            ):
+                self._load_diarization_pipeline()
+
+            progress.complete("preparing_models")
+        except Exception:
+            progress.fail("preparing_models")
+            raise
+
     def transcribe(self, audio_path: Path) -> TranscriptResult:
         import shutil
 
@@ -56,10 +186,7 @@ class WhisperXTranscriber(Transcriber):
             raise SystemExit(1)
 
         # --- Telemetry toggle (must happen before importing whisperx) ---
-        os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
-        if self._diar_config is None or not self._diar_config.telemetry:
-            os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-            os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "0")
+        self._configure_runtime_env()
 
         hf_token_warning: str | None = None
         if (
@@ -96,9 +223,12 @@ class WhisperXTranscriber(Transcriber):
             with contextlib.redirect_stdout(devnull):
                 progress.begin("transcribing")
 
-                if self._model is None:
-                    with contextlib.redirect_stderr(devnull):
-                        self._load_model()
+                self._prepare_transcription_models(
+                    language=self._tx_config.language or None,
+                    step_key="transcribing",
+                    show_deferred_align_note=False,
+                )
+                self._set_detail("transcribing", None)
 
                 audio = whisperx.load_audio(str(audio_path))
 
@@ -119,9 +249,7 @@ class WhisperXTranscriber(Transcriber):
 
                 language = result.get("language", "")
 
-                align_model, align_metadata = whisperx.load_align_model(
-                    language_code=language, device="cpu"
-                )
+                align_model, align_metadata = self._load_align_model(language, step_key="transcribing")
                 with contextlib.redirect_stdout(align_writer):
                     result = whisperx.align(
                         result["segments"],
@@ -142,7 +270,7 @@ class WhisperXTranscriber(Transcriber):
                     and self._diar_config.enabled
                     and self._diar_config.hf_token
                 ):
-                    result = self._diarize(audio, result, devnull)
+                    result = self._diarize(audio, result)
         finally:
             devnull.close()
 
@@ -181,22 +309,14 @@ class WhisperXTranscriber(Transcriber):
             return "mps" if torch.backends.mps.is_available() else "cpu"
         return device_cfg
 
-    def _diarize(self, audio, result, devnull):
+    def _diarize(self, audio, result):
         import pandas as pd
         import torch
         import whisperx
-        from whisperx.diarize import DiarizationPipeline
 
         progress = self._progress
         progress.begin("diarizing")
-
-        device = self._resolve_diarization_device(self._diar_config.device)
-
-        # Load the diarization pipeline (model loading happens inside)
-        with contextlib.redirect_stderr(devnull):
-            diarize_model = DiarizationPipeline(
-                use_auth_token=self._diar_config.hf_token, device=device
-            )
+        diarize_model = self._load_diarization_pipeline(step_key="diarizing")
 
         # Build audio_data dict the same way whisperx does internally
         audio_data = {
