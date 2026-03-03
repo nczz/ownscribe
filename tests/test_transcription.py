@@ -151,8 +151,8 @@ class TestDownloadProgressHooks:
         transcriber._capture_download_output("preparing_models", "Loading Whisper model (base)", fake_loader)
 
         assert progress.updates
-        assert progress.updates[0] == ("preparing_models", 0.0)
-        assert any(key == "preparing_models" and frac > 0 for key, frac in progress.updates[1:])
+        # Progress bar should only appear once download events fire, not eagerly at 0%
+        assert all(frac > 0 for _, frac in progress.updates)
 
     def test_transcribe_inner_does_not_use_preparing_models_step(self):
         from ownscribe.config import TranscriptionConfig
