@@ -78,12 +78,14 @@ def _find_binary() -> Path | None:
 class CoreAudioRecorder(AudioRecorder):
     """Records system audio using the ownscribe-audio Swift helper."""
 
-    def __init__(self, mic: bool = False, mic_device: str = "") -> None:
+    def __init__(self, mic: bool = False, mic_device: str = "", silence_timeout: int = 0) -> None:
         self._mic = mic
         self._mic_device = mic_device
+        self._silence_timeout = silence_timeout
         self._process: subprocess.Popen | None = None
         self._binary = _find_binary()
         self._silence_warning: bool = False
+        self._silence_timed_out: bool = False
         self._muted: bool = False
 
     def is_available(self) -> bool:
@@ -98,6 +100,8 @@ class CoreAudioRecorder(AudioRecorder):
             cmd.append("--mic")
         if self._mic_device:
             cmd.extend(["--mic-device", self._mic_device])
+        if self._silence_timeout > 0:
+            cmd.extend(["--silence-timeout", str(self._silence_timeout)])
 
         self._process = subprocess.Popen(
             cmd,
@@ -121,6 +125,14 @@ class CoreAudioRecorder(AudioRecorder):
     def is_muted(self) -> bool:
         return self._muted
 
+    @property
+    def is_recording(self) -> bool:
+        return self._process is not None and self._process.poll() is None
+
+    @property
+    def silence_timed_out(self) -> bool:
+        return self._silence_timed_out
+
     def stop(self) -> None:
         if self._process and self._process.poll() is None:
             self._process.send_signal(signal.SIGINT)
@@ -138,11 +150,14 @@ class CoreAudioRecorder(AudioRecorder):
             if stderr_output:
                 if "[SILENCE_WARNING]" in stderr_output:
                     self._silence_warning = True
+                if "[SILENCE_TIMEOUT]" in stderr_output:
+                    self._silence_timed_out = True
                 # Filter out mute toggles and known informational lines
                 _NOISE_PREFIXES = ("Recording ", "Saved ", "Merged audio saved")
+                _NOISE_LINES = ("[MIC_MUTED]", "[MIC_UNMUTED]", "[SILENCE_TIMEOUT]")
                 lines = [
                     line for line in stderr_output.strip().splitlines()
-                    if line not in ("[MIC_MUTED]", "[MIC_UNMUTED]")
+                    if line not in _NOISE_LINES
                     and not line.startswith(_NOISE_PREFIXES)
                 ]
                 if lines:

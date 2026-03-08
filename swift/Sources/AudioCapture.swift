@@ -7,6 +7,26 @@ import AppKit
 import CoreAudio
 import AudioToolbox
 
+// MARK: - Constants
+
+/// Minimum peak amplitude to consider microphone audio "loud" (silence timeout).
+private let kMicLoudThreshold: Float = 1e-2
+/// Minimum peak amplitude to consider system audio "loud" (silence timeout).
+private let kSystemLoudThreshold: Float = 1e-4
+
+/// Compute peak amplitude across all channels of float audio data.
+func computePeakLevel(in channelData: UnsafePointer<UnsafeMutablePointer<Float>>,
+               channels: Int, frames: Int) -> Float {
+    var peak: Float = 0
+    for ch in 0..<channels {
+        for i in 0..<frames {
+            let v = abs(channelData[ch][i])
+            if v > peak { peak = v }
+        }
+    }
+    return peak
+}
+
 // MARK: - Mic Capture via AVAudioEngine
 
 class MicCapture {
@@ -17,6 +37,16 @@ class MicCapture {
     // Mute support — guarded by os_unfair_lock (tap callback is on AVAudioEngine thread)
     private var _isMuted = false
     private var _muteLock = os_unfair_lock_s()
+
+    // Level tracking for silence timeout (mirrors SystemAudioCapture pattern)
+    private var _lastLoudTime: UInt64 = DispatchTime.now().uptimeNanoseconds
+    private var _lastLoudTimeLock = os_unfair_lock_s()
+
+    var lastLoudTime: UInt64 {
+        os_unfair_lock_lock(&_lastLoudTimeLock)
+        defer { os_unfair_lock_unlock(&_lastLoudTimeLock) }
+        return _lastLoudTime
+    }
 
     var isMuted: Bool {
         os_unfair_lock_lock(&_muteLock)
@@ -65,11 +95,23 @@ class MicCapture {
             if self.startHostTime == 0 {
                 self.startHostTime = time.hostTime
             }
-            if self.isMuted, let channelData = buffer.floatChannelData {
+            let muted = self.isMuted
+            if muted, let channelData = buffer.floatChannelData {
                 let channels = Int(buffer.format.channelCount)
                 let frames = Int(buffer.frameLength)
                 for ch in 0..<channels {
                     memset(channelData[ch], 0, frames * MemoryLayout<Float>.size)
+                }
+            }
+            // Track peak level for silence timeout (muted mic = silence)
+            if !muted, let channelData = buffer.floatChannelData {
+                let peak = computePeakLevel(in: channelData,
+                                     channels: Int(buffer.format.channelCount),
+                                     frames: Int(buffer.frameLength))
+                if peak > kMicLoudThreshold {
+                    os_unfair_lock_lock(&self._lastLoudTimeLock)
+                    self._lastLoudTime = DispatchTime.now().uptimeNanoseconds
+                    os_unfair_lock_unlock(&self._lastLoudTimeLock)
                 }
             }
             try? self.audioFile?.write(from: buffer)
@@ -165,6 +207,14 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
     private var silenceChecked: Bool = false
     private var silenceWarned: Bool = false
 
+    // Silence timeout auto-stop
+    var silenceTimeout: TimeInterval = 0  // seconds; 0 = disabled
+    var onSilenceTimeout: (() -> Void)?
+    var micCapture: MicCapture?  // checked by silence timer
+    private var lastLoudTime: UInt64 = DispatchTime.now().uptimeNanoseconds
+    private var lastLoudTimeLock = os_unfair_lock_s()
+    private var silenceTimer: DispatchSourceTimer?
+
     // Picker continuation
     private var startContinuation: CheckedContinuation<Void, Error>?
 
@@ -239,10 +289,48 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
         // Create and start stream
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
+
+        // Initialize last-loud time before starting capture (no lock needed — callbacks haven't started)
+        if silenceTimeout > 0 {
+            lastLoudTime = DispatchTime.now().uptimeNanoseconds
+        }
+
         try await stream.startCapture()
         self.stream = stream
 
         fputs("Recording system audio to \(outputPath)... Press Ctrl+C to stop.\n", stderr)
+
+        // Start silence timeout timer if configured.
+        // Checks every 1s whether both system audio and mic (if active) have been
+        // quiet longer than silenceTimeout. Uses the most recent "loud" timestamp
+        // from either source so that activity on either channel prevents auto-stop.
+        if silenceTimeout > 0 {
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + 1, repeating: 1.0)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                let now = DispatchTime.now().uptimeNanoseconds
+                os_unfair_lock_lock(&self.lastLoudTimeLock)
+                var effectiveLastLoud = self.lastLoudTime
+                os_unfair_lock_unlock(&self.lastLoudTimeLock)
+                // If mic is active, use the more recent of the two
+                if let mic = self.micCapture {
+                    let micLastLoud = mic.lastLoudTime
+                    if micLastLoud > effectiveLastLoud {
+                        effectiveLastLoud = micLastLoud
+                    }
+                }
+                let elapsed = Double(now - effectiveLastLoud) / 1_000_000_000.0
+                if elapsed > self.silenceTimeout {
+                    fputs("[SILENCE_TIMEOUT]\n", stderr)
+                    self.silenceTimer?.cancel()
+                    self.silenceTimer = nil
+                    self.onSilenceTimeout?()
+                }
+            }
+            timer.resume()
+            silenceTimer = timer
+        }
     }
 
     // MARK: - SCStreamOutput
@@ -300,15 +388,16 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
         totalFrames += Int64(frameCount)
 
         // Peak detection on float channel data
-        if let channelData = pcmBuffer.floatChannelData {
-            let channelCount = Int(sampleFormat.channelCount)
-            for ch in 0..<channelCount {
-                let samples = channelData[ch]
-                for i in 0..<Int(frameCount) {
-                    let absVal = abs(samples[i])
-                    if absVal > peakLevel { peakLevel = absVal }
-                }
-            }
+        let bufferPeak: Float = pcmBuffer.floatChannelData.map {
+            computePeakLevel(in: $0, channels: Int(sampleFormat.channelCount), frames: Int(frameCount))
+        } ?? 0.0
+        if bufferPeak > self.peakLevel { self.peakLevel = bufferPeak }
+
+        // Update last loud time for silence timeout
+        if bufferPeak > kSystemLoudThreshold {
+            os_unfair_lock_lock(&lastLoudTimeLock)
+            lastLoudTime = DispatchTime.now().uptimeNanoseconds
+            os_unfair_lock_unlock(&lastLoudTimeLock)
         }
 
         // Check for silence after ~3 seconds of data
@@ -331,6 +420,9 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
     // MARK: - Stop
 
     func stop() {
+        silenceTimer?.cancel()
+        silenceTimer = nil
+
         let sem = DispatchSemaphore(value: 0)
         Task.detached { [stream] in
             try? await stream?.stopCapture()
@@ -615,7 +707,7 @@ func printUsage() {
     ownscribe-audio — system audio capture helper
 
     USAGE:
-        ownscribe-audio capture --output FILE [--mic] [--mic-device NAME]
+        ownscribe-audio capture --output FILE [--mic] [--mic-device NAME] [--silence-timeout N]
         ownscribe-audio list-apps
         ownscribe-audio list-devices
 
@@ -623,6 +715,7 @@ func printUsage() {
         --output, -o FILE    Output WAV file path (required for capture)
         --mic                Also capture microphone input
         --mic-device NAME    Use specific mic input device (implies --mic)
+        --silence-timeout N  Auto-stop after N seconds of silence (0 = disabled)
         --help, -h           Show this help
 
     SUBCOMMANDS:
@@ -657,6 +750,7 @@ func main() {
         var outputPath: String?
         var enableMic = false
         var micDeviceName: String?
+        var silenceTimeout: TimeInterval = 0
 
         var i = 2
         while i < args.count {
@@ -678,6 +772,17 @@ func main() {
                 }
                 micDeviceName = args[i]
                 enableMic = true  // --mic-device implies --mic
+            case "--silence-timeout":
+                i += 1
+                guard i < args.count, let val = TimeInterval(args[i]) else {
+                    fputs("Error: --silence-timeout requires a number of seconds\n", stderr)
+                    exit(1)
+                }
+                if val < 0 {
+                    fputs("Error: --silence-timeout must be zero (disabled) or a positive number of seconds\n", stderr)
+                    exit(1)
+                }
+                silenceTimeout = val
             default:
                 fputs("Unknown option: \(args[i])\n", stderr)
                 printUsage()
@@ -697,6 +802,7 @@ func main() {
         let micPath = output + ".mic.tmp.wav"
 
         let capture = SystemAudioCapture(outputPath: systemPath)
+        capture.silenceTimeout = silenceTimeout
         var micCapture: MicCapture?
 
         if enableMic {
@@ -708,7 +814,29 @@ func main() {
                 exit(1)
             }
             micCapture = mic
+            capture.micCapture = mic
         }
+
+        // Shared shutdown logic for SIGINT, SIGTERM, and silence timeout
+        let shutdown: () -> Void = {
+            capture.stop()
+            if let mic = micCapture {
+                mic.stop()
+                do {
+                    try mergeAudioFiles(
+                        systemPath: systemPath,
+                        micPath: micPath,
+                        systemStartHostTime: capture.startHostTime,
+                        micStartHostTime: mic.startHostTime,
+                        outputPath: output)
+                } catch {
+                    fputs("Error merging audio: \(error)\n", stderr)
+                }
+            }
+            exit(0)
+        }
+
+        capture.onSilenceTimeout = shutdown
 
         // Toggle mic mute on SIGUSR1 (sent by Python wrapper)
         var _sigusr1Source: DispatchSourceSignal?  // retained to keep source alive
@@ -724,45 +852,12 @@ func main() {
         // Handle Ctrl+C gracefully
         let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         signal(SIGINT, SIG_IGN)
-        sigintSource.setEventHandler {
-            capture.stop()
-            if let mic = micCapture {
-                mic.stop()
-                // Merge the two files
-                do {
-                    try mergeAudioFiles(
-                        systemPath: systemPath,
-                        micPath: micPath,
-                        systemStartHostTime: capture.startHostTime,
-                        micStartHostTime: mic.startHostTime,
-                        outputPath: output)
-                } catch {
-                    fputs("Error merging audio: \(error)\n", stderr)
-                }
-            }
-            exit(0)
-        }
+        sigintSource.setEventHandler { shutdown() }
         sigintSource.resume()
 
         let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         signal(SIGTERM, SIG_IGN)
-        sigtermSource.setEventHandler {
-            capture.stop()
-            if let mic = micCapture {
-                mic.stop()
-                do {
-                    try mergeAudioFiles(
-                        systemPath: systemPath,
-                        micPath: micPath,
-                        systemStartHostTime: capture.startHostTime,
-                        micStartHostTime: mic.startHostTime,
-                        outputPath: output)
-                } catch {
-                    fputs("Error merging audio: \(error)\n", stderr)
-                }
-            }
-            exit(0)
-        }
+        sigtermSource.setEventHandler { shutdown() }
         sigtermSource.resume()
 
         Task {

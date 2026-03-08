@@ -28,3 +28,8 @@ class AudioRecorder(abc.ABC):
     def is_muted(self) -> bool:
         """Whether the microphone is currently muted."""
         return False
+
+    @property
+    @abc.abstractmethod
+    def is_recording(self) -> bool:
+        """Whether the recorder is still actively recording."""
