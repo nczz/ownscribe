@@ -67,6 +67,7 @@ class SoundDeviceRecorder(AudioRecorder):
                     self._last_loud_time = _time.monotonic()
                 elif _time.monotonic() - self._last_loud_time > self._silence_timeout:
                     self._timed_out = True
+                    raise sd.CallbackStop
 
         self._stream = sd.InputStream(
             device=self._device,
@@ -79,6 +80,10 @@ class SoundDeviceRecorder(AudioRecorder):
     @property
     def is_recording(self) -> bool:
         return not self._timed_out and self._stream is not None
+
+    @property
+    def silence_timed_out(self) -> bool:
+        return self._timed_out
 
     def stop(self) -> None:
         if self._stream is not None:

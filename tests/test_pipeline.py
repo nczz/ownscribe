@@ -49,6 +49,31 @@ class TestCreateRecorder:
             recorder = _create_recorder(config)
             assert recorder == mock_sd.return_value
 
+    def test_silence_timeout_passed_to_coreaudio(self):
+        from ownscribe.pipeline import _create_recorder
+
+        config = Config()
+        config.audio.backend = "coreaudio"
+        config.audio.device = ""
+        config.audio.silence_timeout = 120
+
+        with mock.patch("ownscribe.audio.coreaudio.CoreAudioRecorder") as mock_cls:
+            mock_cls.return_value.is_available.return_value = True
+            _create_recorder(config)
+            mock_cls.assert_called_once_with(mic=False, mic_device="", silence_timeout=120)
+
+    def test_silence_timeout_passed_to_sounddevice(self):
+        from ownscribe.pipeline import _create_recorder
+
+        config = Config()
+        config.audio.backend = "coreaudio"
+        config.audio.device = "USB Mic"
+        config.audio.silence_timeout = 60
+
+        with mock.patch("ownscribe.audio.sounddevice_recorder.SoundDeviceRecorder") as mock_sd:
+            _create_recorder(config)
+            mock_sd.assert_called_once_with(device="USB Mic", silence_timeout=60)
+
 
 class TestFormatOutput:
     def test_markdown_format(self, sample_transcript):

@@ -49,6 +49,10 @@ class TestDefaults:
         cfg = Config()
         assert cfg.templates == {}
 
+    def test_default_silence_timeout(self):
+        cfg = Config()
+        assert cfg.audio.silence_timeout == 300
+
 
 class TestMergeToml:
     def test_full_override(self):

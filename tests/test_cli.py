@@ -63,6 +63,22 @@ class TestMainCommand:
             config = mock_run.call_args[0][0]
             assert config.transcription.language == "de"
 
+    def test_silence_timeout_flag(self):
+        runner = CliRunner()
+        with _mock_config(), mock.patch("ownscribe.pipeline.run_pipeline") as mock_run:
+            result = runner.invoke(cli, ["--silence-timeout", "60"])
+            assert result.exit_code == 0
+            config = mock_run.call_args[0][0]
+            assert config.audio.silence_timeout == 60
+
+    def test_silence_timeout_disable(self):
+        runner = CliRunner()
+        with _mock_config(), mock.patch("ownscribe.pipeline.run_pipeline") as mock_run:
+            result = runner.invoke(cli, ["--silence-timeout", "0"])
+            assert result.exit_code == 0
+            config = mock_run.call_args[0][0]
+            assert config.audio.silence_timeout == 0
+
 
 class TestSubcommandHelp:
     def test_transcribe_help(self):

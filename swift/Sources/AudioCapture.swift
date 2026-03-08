@@ -275,6 +275,12 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
         // Create and start stream
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
+
+        // Initialize last-loud time before starting capture (no lock needed — callbacks haven't started)
+        if silenceTimeout > 0 {
+            lastLoudTime = Date()
+        }
+
         try await stream.startCapture()
         self.stream = stream
 
@@ -282,7 +288,6 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
 
         // Start silence timeout timer if configured
         if silenceTimeout > 0 {
-            lastLoudTime = Date()
 
             let timer = DispatchSource.makeTimerSource(queue: .main)
             timer.schedule(deadline: .now() + 1, repeating: 1.0)
@@ -406,6 +411,9 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
     // MARK: - Stop
 
     func stop() {
+        silenceTimer?.cancel()
+        silenceTimer = nil
+
         let sem = DispatchSemaphore(value: 0)
         Task.detached { [stream] in
             try? await stream?.stopCapture()
@@ -690,7 +698,7 @@ func printUsage() {
     ownscribe-audio — system audio capture helper
 
     USAGE:
-        ownscribe-audio capture --output FILE [--mic] [--mic-device NAME]
+        ownscribe-audio capture --output FILE [--mic] [--mic-device NAME] [--silence-timeout N]
         ownscribe-audio list-apps
         ownscribe-audio list-devices
 
@@ -698,6 +706,7 @@ func printUsage() {
         --output, -o FILE    Output WAV file path (required for capture)
         --mic                Also capture microphone input
         --mic-device NAME    Use specific mic input device (implies --mic)
+        --silence-timeout N  Auto-stop after N seconds of silence (0 = disabled)
         --help, -h           Show this help
 
     SUBCOMMANDS:

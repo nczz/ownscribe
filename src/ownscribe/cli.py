@@ -45,7 +45,10 @@ def _dir_size(path: str) -> str:
     help="Keep or delete WAV recordings after transcription.",
 )
 @click.option("--template", default=None, help="Summarization template (meeting, lecture, brief, or custom).")
-@click.option("--silence-timeout", default=None, type=int, help="Seconds of silence before auto-stopping recording (0 to disable).")
+@click.option(
+    "--silence-timeout", default=None, type=int,
+    help="Seconds of silence before auto-stopping recording (0 to disable).",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
