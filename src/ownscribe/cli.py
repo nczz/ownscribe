@@ -45,6 +45,7 @@ def _dir_size(path: str) -> str:
     help="Keep or delete WAV recordings after transcription.",
 )
 @click.option("--template", default=None, help="Summarization template (meeting, lecture, brief, or custom).")
+@click.option("--silence-timeout", default=None, type=int, help="Seconds of silence before auto-stopping recording (0 to disable).")
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -58,6 +59,7 @@ def cli(
     mic_device: str | None,
     keep_recording: bool | None,
     template: str | None,
+    silence_timeout: int | None,
 ) -> None:
     """Fully local meeting transcription and summarization.
 
@@ -89,6 +91,8 @@ def cli(
         config.output.keep_recording = keep_recording
     if template:
         config.summarization.template = template
+    if silence_timeout is not None:
+        config.audio.silence_timeout = silence_timeout
 
     ctx.obj["config"] = config
 

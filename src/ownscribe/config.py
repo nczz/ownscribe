@@ -16,6 +16,7 @@ backend = "coreaudio"     # "coreaudio" (default) or "sounddevice"
 device = ""               # empty = system audio; or device name/index for sounddevice
 mic = false               # also capture microphone input
 mic_device = ""           # specific mic device name (empty = default)
+silence_timeout = 300     # seconds of silence before auto-stop; 0 = disabled
 
 [transcription]
 model = "base"            # whisper model: tiny, base, small, medium, large-v3
@@ -55,6 +56,7 @@ class AudioConfig:
     device: str = ""
     mic: bool = False
     mic_device: str = ""
+    silence_timeout: int = 300  # seconds of silence before auto-stop; 0 = disabled
 
 
 @dataclass

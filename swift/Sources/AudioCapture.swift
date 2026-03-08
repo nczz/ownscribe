@@ -18,6 +18,16 @@ class MicCapture {
     private var _isMuted = false
     private var _muteLock = os_unfair_lock_s()
 
+    // Level tracking for silence timeout (mirrors SystemAudioCapture pattern)
+    private var _lastLoudTime = Date()
+    private var _lastLoudTimeLock = os_unfair_lock_s()
+
+    var lastLoudTime: Date {
+        os_unfair_lock_lock(&_lastLoudTimeLock)
+        defer { os_unfair_lock_unlock(&_lastLoudTimeLock) }
+        return _lastLoudTime
+    }
+
     var isMuted: Bool {
         os_unfair_lock_lock(&_muteLock)
         defer { os_unfair_lock_unlock(&_muteLock) }
@@ -65,11 +75,29 @@ class MicCapture {
             if self.startHostTime == 0 {
                 self.startHostTime = time.hostTime
             }
-            if self.isMuted, let channelData = buffer.floatChannelData {
+            let muted = self.isMuted
+            if muted, let channelData = buffer.floatChannelData {
                 let channels = Int(buffer.format.channelCount)
                 let frames = Int(buffer.frameLength)
                 for ch in 0..<channels {
                     memset(channelData[ch], 0, frames * MemoryLayout<Float>.size)
+                }
+            }
+            // Track peak level for silence timeout (muted mic = silence)
+            if !muted, let channelData = buffer.floatChannelData {
+                let channels = Int(buffer.format.channelCount)
+                let frames = Int(buffer.frameLength)
+                var peak: Float = 0
+                for ch in 0..<channels {
+                    for i in 0..<frames {
+                        let v = abs(channelData[ch][i])
+                        if v > peak { peak = v }
+                    }
+                }
+                if peak > 1e-2 {
+                    os_unfair_lock_lock(&self._lastLoudTimeLock)
+                    self._lastLoudTime = Date()
+                    os_unfair_lock_unlock(&self._lastLoudTimeLock)
                 }
             }
             try? self.audioFile?.write(from: buffer)
@@ -165,6 +193,14 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
     private var silenceChecked: Bool = false
     private var silenceWarned: Bool = false
 
+    // Silence timeout auto-stop
+    var silenceTimeout: TimeInterval = 0  // seconds; 0 = disabled
+    var onSilenceTimeout: (() -> Void)?
+    var micCapture: MicCapture?  // checked by silence timer
+    private var lastLoudTime = Date()
+    private var lastLoudTimeLock = os_unfair_lock_s()
+    private var silenceTimer: DispatchSourceTimer?
+
     // Picker continuation
     private var startContinuation: CheckedContinuation<Void, Error>?
 
@@ -243,6 +279,36 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
         self.stream = stream
 
         fputs("Recording system audio to \(outputPath)... Press Ctrl+C to stop.\n", stderr)
+
+        // Start silence timeout timer if configured
+        if silenceTimeout > 0 {
+            lastLoudTime = Date()
+
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + 1, repeating: 1.0)
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                os_unfair_lock_lock(&self.lastLoudTimeLock)
+                var effectiveLastLoud = self.lastLoudTime
+                os_unfair_lock_unlock(&self.lastLoudTimeLock)
+                // If mic is active, use the more recent of the two
+                if let mic = self.micCapture {
+                    let micLastLoud = mic.lastLoudTime
+                    if micLastLoud > effectiveLastLoud {
+                        effectiveLastLoud = micLastLoud
+                    }
+                }
+                let elapsed = Date().timeIntervalSince(effectiveLastLoud)
+                if elapsed > self.silenceTimeout {
+                    fputs("[SILENCE_TIMEOUT]\n", stderr)
+                    self.silenceTimer?.cancel()
+                    self.silenceTimer = nil
+                    self.onSilenceTimeout?()
+                }
+            }
+            timer.resume()
+            silenceTimer = timer
+        }
     }
 
     // MARK: - SCStreamOutput
@@ -300,15 +366,24 @@ class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate, SCContentS
         totalFrames += Int64(frameCount)
 
         // Peak detection on float channel data
+        var bufferPeak: Float = 0.0
         if let channelData = pcmBuffer.floatChannelData {
             let channelCount = Int(sampleFormat.channelCount)
             for ch in 0..<channelCount {
                 let samples = channelData[ch]
                 for i in 0..<Int(frameCount) {
                     let absVal = abs(samples[i])
-                    if absVal > peakLevel { peakLevel = absVal }
+                    if absVal > bufferPeak { bufferPeak = absVal }
                 }
             }
+        }
+        if bufferPeak > peakLevel { peakLevel = bufferPeak }
+
+        // Update last loud time for silence timeout
+        if bufferPeak > 1e-4 {
+            os_unfair_lock_lock(&lastLoudTimeLock)
+            lastLoudTime = Date()
+            os_unfair_lock_unlock(&lastLoudTimeLock)
         }
 
         // Check for silence after ~3 seconds of data
@@ -657,6 +732,7 @@ func main() {
         var outputPath: String?
         var enableMic = false
         var micDeviceName: String?
+        var silenceTimeout: TimeInterval = 0
 
         var i = 2
         while i < args.count {
@@ -678,6 +754,13 @@ func main() {
                 }
                 micDeviceName = args[i]
                 enableMic = true  // --mic-device implies --mic
+            case "--silence-timeout":
+                i += 1
+                guard i < args.count, let val = TimeInterval(args[i]) else {
+                    fputs("Error: --silence-timeout requires a number of seconds\n", stderr)
+                    exit(1)
+                }
+                silenceTimeout = val
             default:
                 fputs("Unknown option: \(args[i])\n", stderr)
                 printUsage()
@@ -697,6 +780,7 @@ func main() {
         let micPath = output + ".mic.tmp.wav"
 
         let capture = SystemAudioCapture(outputPath: systemPath)
+        capture.silenceTimeout = silenceTimeout
         var micCapture: MicCapture?
 
         if enableMic {
@@ -708,7 +792,29 @@ func main() {
                 exit(1)
             }
             micCapture = mic
+            capture.micCapture = mic
         }
+
+        // Shared shutdown logic for SIGINT, SIGTERM, and silence timeout
+        let shutdown: () -> Void = {
+            capture.stop()
+            if let mic = micCapture {
+                mic.stop()
+                do {
+                    try mergeAudioFiles(
+                        systemPath: systemPath,
+                        micPath: micPath,
+                        systemStartHostTime: capture.startHostTime,
+                        micStartHostTime: mic.startHostTime,
+                        outputPath: output)
+                } catch {
+                    fputs("Error merging audio: \(error)\n", stderr)
+                }
+            }
+            exit(0)
+        }
+
+        capture.onSilenceTimeout = shutdown
 
         // Toggle mic mute on SIGUSR1 (sent by Python wrapper)
         var _sigusr1Source: DispatchSourceSignal?  // retained to keep source alive
@@ -724,45 +830,12 @@ func main() {
         // Handle Ctrl+C gracefully
         let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
         signal(SIGINT, SIG_IGN)
-        sigintSource.setEventHandler {
-            capture.stop()
-            if let mic = micCapture {
-                mic.stop()
-                // Merge the two files
-                do {
-                    try mergeAudioFiles(
-                        systemPath: systemPath,
-                        micPath: micPath,
-                        systemStartHostTime: capture.startHostTime,
-                        micStartHostTime: mic.startHostTime,
-                        outputPath: output)
-                } catch {
-                    fputs("Error merging audio: \(error)\n", stderr)
-                }
-            }
-            exit(0)
-        }
+        sigintSource.setEventHandler { shutdown() }
         sigintSource.resume()
 
         let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         signal(SIGTERM, SIG_IGN)
-        sigtermSource.setEventHandler {
-            capture.stop()
-            if let mic = micCapture {
-                mic.stop()
-                do {
-                    try mergeAudioFiles(
-                        systemPath: systemPath,
-                        micPath: micPath,
-                        systemStartHostTime: capture.startHostTime,
-                        micStartHostTime: mic.startHostTime,
-                        outputPath: output)
-                } catch {
-                    fputs("Error merging audio: \(error)\n", stderr)
-                }
-            }
-            exit(0)
-        }
+        sigtermSource.setEventHandler { shutdown() }
         sigtermSource.resume()
 
         Task {

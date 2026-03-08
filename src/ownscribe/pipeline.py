@@ -71,7 +71,11 @@ def _create_recorder(config: Config):
     if config.audio.backend == "coreaudio" and not config.audio.device:
         from ownscribe.audio.coreaudio import CoreAudioRecorder
 
-        recorder = CoreAudioRecorder(mic=config.audio.mic, mic_device=config.audio.mic_device)
+        recorder = CoreAudioRecorder(
+            mic=config.audio.mic,
+            mic_device=config.audio.mic_device,
+            silence_timeout=config.audio.silence_timeout,
+        )
         if recorder.is_available():
             return recorder
         click.echo("Core Audio helper not found, falling back to sounddevice.")
@@ -82,7 +86,7 @@ def _create_recorder(config: Config):
     # Try to parse as int (device index)
     if isinstance(device, str) and device.isdigit():
         device = int(device)
-    return SoundDeviceRecorder(device=device)
+    return SoundDeviceRecorder(device=device, silence_timeout=config.audio.silence_timeout)
 
 
 def _create_transcriber(config: Config, progress=None):
@@ -159,10 +163,18 @@ def run_pipeline(config: Config) -> None:
     can_mute = isinstance(recorder, CoreAudioRecorder) and config.audio.mic
     is_tty = sys.stdin.isatty()
 
-    hint = " Press Ctrl+C to stop."
+    hints = []
     if can_mute and is_tty:
-        hint = " Press 'm' to mute/unmute mic, Ctrl+C to stop."
-    click.echo(f"Starting recording...{hint}\n")
+        hints.append("Press 'm' to mute/unmute mic.")
+    silence_timeout = config.audio.silence_timeout
+    if silence_timeout > 0:
+        mins_timeout = silence_timeout // 60
+        if mins_timeout > 0:
+            hints.append(f"Auto-stops after {mins_timeout}m of silence.")
+        else:
+            hints.append(f"Auto-stops after {silence_timeout}s of silence.")
+    hints.append("Press Ctrl+C to stop.")
+    click.echo(f"Starting recording... {' '.join(hints)}\n")
     recorder.start(audio_path)
 
     start_time = time.time()
@@ -182,7 +194,7 @@ def run_pipeline(config: Config) -> None:
 
     warned_no_data = False
     try:
-        while not stop_event:
+        while not stop_event and recorder.is_recording:
             elapsed = time.time() - start_time
             mins, secs = divmod(int(elapsed), 60)
             mute_indicator = "  [MIC MUTED]" if recorder.is_muted else ""
@@ -216,7 +228,10 @@ def run_pipeline(config: Config) -> None:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_termios)
         signal.signal(signal.SIGINT, original_handler)
 
-    click.echo("\n\nStopping recording...")
+    if not stop_event:
+        click.echo("\n\nRecording auto-stopped after silence timeout.")
+    else:
+        click.echo("\n\nStopping recording...")
     recorder.stop()
 
     if not audio_path.exists() or audio_path.stat().st_size <= _WAV_HEADER_SIZE:

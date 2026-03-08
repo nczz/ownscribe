@@ -10,6 +10,20 @@ Record, transcribe, and summarize meetings and system audio entirely on your mac
 
 > System audio capture requires **macOS 14.2 or later**. Other platforms can use the sounddevice backend with an external audio source.
 
+## Table of Contents
+
+- [Privacy](#privacy)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Summarization Templates](#summarization-templates)
+- [Speaker Diarization](#speaker-diarization)
+- [Acknowledgments](#acknowledgments)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Privacy
 
 ownscribe **does not**:
@@ -36,6 +50,7 @@ All audio, transcripts, and summaries remain local.
 - **Summarization templates** — built-in presets for meetings, lectures, and quick briefs; define your own in config
 - **Ask your meetings** — ask natural-language questions across all your meeting notes; uses a two-stage LLM pipeline with keyword fallback
   <br><img src="docs/demo-ask.gif" alt="ownscribe ask demo" width="700">
+- **Silence auto-stop** — automatically stops recording after sustained silence (default: 5 minutes, configurable)
 - **One command** — just run `ownscribe`, press Ctrl+C when done, get transcript + summary
 
 ## Requirements
@@ -90,7 +105,7 @@ ownscribe                    # records system audio, Ctrl+C to stop
 ```
 
 This will:
-1. Capture system audio until you press Ctrl+C
+1. Capture system audio until you press Ctrl+C (or auto-stop after 5 minutes of silence)
 2. Transcribe with WhisperX
 3. Summarize with your local LLM
 4. Save everything to `~/ownscribe/YYYY-MM-DD_HHMMSS/`
@@ -105,11 +120,13 @@ ownscribe --mic-device "MacBook Pro Microphone" # capture system audio + specifi
 ownscribe --device "MacBook Pro Microphone"   # use mic instead of system audio
 ownscribe --no-summarize                      # skip LLM summarization
 ownscribe --diarize                           # enable speaker identification
-ownscribe --language en                        # set transcription language (default: auto-detect)
+ownscribe --language en                       # set transcription language (default: auto-detect)
 ownscribe --model large-v3                    # use a larger Whisper model
 ownscribe --format json                       # output as JSON instead of markdown
 ownscribe --no-keep-recording                 # auto-delete WAV files after transcription
 ownscribe --template lecture                  # use the lecture summarization template
+ownscribe --silence-timeout 600               # auto-stop after 10 minutes of silence
+ownscribe --silence-timeout 0                 # disable silence auto-stop
 ```
 
 ### Subcommands
@@ -160,6 +177,7 @@ backend = "coreaudio"     # "coreaudio" or "sounddevice"
 device = ""               # empty = system audio
 mic = false               # also capture microphone input
 mic_device = ""           # specific mic device name (empty = default)
+silence_timeout = 300     # seconds of silence before auto-stop; 0 = disabled
 
 [transcription]
 model = "base"            # tiny, base, small, medium, large-v3
