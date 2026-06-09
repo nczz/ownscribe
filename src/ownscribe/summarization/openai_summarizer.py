@@ -15,11 +15,13 @@ class OpenAISummarizer(Summarizer):
     def __init__(self, config: SummarizationConfig, templates: dict | None = None) -> None:
         self._config = config
         self._templates = templates or {}
-        # For local servers, no API key needed — use a dummy
         base_url = config.host
         if not base_url.endswith("/v1"):
             base_url = base_url.rstrip("/") + "/v1"
-        self._client = openai.OpenAI(base_url=base_url, api_key="not-needed")
+        # Most local servers ignore the key; servers that require auth (e.g. oMLX)
+        # read it from config.api_key or the OPENAI_API_KEY env var.
+        api_key = config.api_key or "not-needed"
+        self._client = openai.OpenAI(base_url=base_url, api_key=api_key)
 
     def chat(
         self, system_prompt: str, user_prompt: str,

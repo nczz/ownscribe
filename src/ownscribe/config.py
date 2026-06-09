@@ -38,6 +38,7 @@ enabled = true
 backend = "local"         # "local" (built-in, no server needed), "ollama", or "openai"
 model = "phi-4-mini"      # local: "phi-4-mini", path to GGUF, or hf:owner/repo/file.gguf; ollama/openai: model name
 # host = "http://localhost:11434"  # only for ollama/openai backends
+# api_key = ""            # only for openai backend; required by servers like oMLX (or set OPENAI_API_KEY)
 # template = "meeting"    # built-in: "meeting", "lecture", or "brief"
 # context_size = 0        # 0 = auto-detect from model; set manually for OpenAI-compatible backends
 
@@ -87,6 +88,7 @@ class SummarizationConfig:
     backend: str = "local"
     model: str = "phi-4-mini"
     host: str = "http://localhost:11434"
+    api_key: str = ""
     template: str = ""
     context_size: int = 0
 
@@ -132,6 +134,8 @@ class Config:
             config.diarization.hf_token = hf_token
         if ollama_host := os.environ.get("OLLAMA_HOST"):
             config.summarization.host = ollama_host
+        if api_key := os.environ.get("OPENAI_API_KEY"):
+            config.summarization.api_key = api_key
 
         return config
 

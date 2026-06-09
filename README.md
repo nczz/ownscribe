@@ -220,6 +220,7 @@ enabled = true
 backend = "local"         # "local" (built-in, no server needed), "ollama", or "openai"
 model = "phi-4-mini"      # local: "phi-4-mini", path to GGUF, or hf:owner/repo/file.gguf; ollama/openai: model name
 # host = "http://localhost:11434"  # only for ollama/openai backends
+# api_key = ""            # only for openai backend; required by servers like oMLX (or set OPENAI_API_KEY)
 # template = "meeting"    # "meeting", "lecture", "brief", or a custom name
 # context_size = 0        # 0 = auto-detect from model; set manually for OpenAI-compatible backends
 
@@ -234,7 +235,7 @@ format = "markdown"       # "markdown" or "json"
 keep_recording = true     # false = auto-delete WAV after transcription
 ```
 
-**Precedence:** CLI flags > environment variables (`HF_TOKEN`, `OLLAMA_HOST`) > config file > defaults.
+**Precedence:** CLI flags > environment variables (`HF_TOKEN`, `OLLAMA_HOST`, `OPENAI_API_KEY`) > config file > defaults.
 
 ## Summarization Templates
 
