@@ -106,6 +106,17 @@ bash swift/build.sh
 uv sync --extra all
 ```
 
+When installed from source, the `ownscribe` command lives inside the project's
+virtual environment, so run it with `uv run` from the repo directory:
+
+```bash
+uv run ownscribe          # equivalent to the bare `ownscribe` used below
+```
+
+Alternatively, activate the environment once (`source .venv/bin/activate`) and
+then call `ownscribe` directly. The examples in [Usage](#usage) use the bare
+`ownscribe` form, which works after activation or via `uvx ownscribe`.
+
 ## Usage
 
 ### Record, transcribe, and summarize a meeting
