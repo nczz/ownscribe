@@ -514,15 +514,18 @@ def _do_transcribe_and_summarize(
 
 
 _AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
+# Video containers whose audio track ffmpeg/WhisperX can decode (e.g. meeting recordings).
+_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".mkv"}
+_MEDIA_EXTENSIONS = _AUDIO_EXTENSIONS | _VIDEO_EXTENSIONS
 
 
 def _find_audio(directory: Path) -> Path | None:
-    """Find an audio file in directory, preferring 'recording.wav'."""
+    """Find an audio or video file in directory, preferring 'recording.wav'."""
     recording = directory / "recording.wav"
     if recording.exists():
         return recording
     for f in directory.iterdir():
-        if f.is_file() and f.suffix.lower() in _AUDIO_EXTENSIONS:
+        if f.is_file() and f.suffix.lower() in _MEDIA_EXTENSIONS:
             return f
     return None
 

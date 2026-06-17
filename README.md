@@ -158,13 +158,15 @@ ownscribe --silence-timeout 0                 # disable silence auto-stop
 ownscribe devices                  # list audio devices (uses native CoreAudio when available)
 ownscribe apps                     # list running apps with PIDs for use with --pid
 ownscribe warmup                   # prefetch WhisperX/pyannote models before a meeting
-ownscribe transcribe recording.wav # transcribe an audio file (saves alongside the input)
+ownscribe transcribe recording.wav # transcribe an audio or video file: wav/mp3/mp4/mov/mkv (saved alongside)
 ownscribe summarize transcript.md  # summarize a transcript (saves alongside the input)
-ownscribe resume ./2026-02-20_1736 # resume a failed/partial pipeline in a directory
+ownscribe resume ./2026-02-20_1736 # resume a partial run, or process a folder's audio/video recording
 ownscribe ask "question"           # search your meetings with a natural-language question
 ownscribe config                   # open config file in $EDITOR
 ownscribe cleanup                  # remove ownscribe data from disk
 ```
+
+> **Video files work too.** Anywhere ownscribe accepts an audio file it also accepts a video container (mp4, mov, mkv, m4v) — it extracts the audio track via ffmpeg. To turn a recording into full notes, drop it in a folder and run `ownscribe resume ./that-folder/` (transcript + summary); use `ownscribe transcribe meeting.mp4` for a transcript only.
 
 Use `warmup` ahead of time to avoid first-run model download delays while recording:
 
