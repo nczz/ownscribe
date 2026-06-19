@@ -346,33 +346,36 @@ def run_summarize(config: Config, transcript_file: str) -> None:
     out_dir = transcript_path.parent
     local_sum = config.summarization.backend == "local"
 
-    with PipelineProgress(
-        transcribe=False,
-        diarize=False,
-        summarize=True,
-        download_summarizer=local_sum,
-    ) as progress:
-        progress.begin("summarizing")
-        if local_sum:
-            progress.begin("downloading_model")
-            try:
-                _download_summarization_model(
-                    config.summarization.model,
-                    progress,
-                    "downloading_model",
-                )
-                progress.complete("downloading_model")
-            except Exception:
-                progress.fail("downloading_model")
-                click.echo(
-                    f"Error: Failed to download summarization model '{config.summarization.model}'.\n"
-                    "Check your internet connection and try again.",
-                    err=True,
-                )
-                raise SystemExit(1) from None
-        summary = summarizer.summarize(transcript_text)
-        title_slug = _generate_title_slug(summary, summarizer)
-        progress.complete("summarizing")
+    try:
+        with PipelineProgress(
+            transcribe=False,
+            diarize=False,
+            summarize=True,
+            download_summarizer=local_sum,
+        ) as progress:
+            progress.begin("summarizing")
+            if local_sum:
+                progress.begin("downloading_model")
+                try:
+                    _download_summarization_model(
+                        config.summarization.model,
+                        progress,
+                        "downloading_model",
+                    )
+                    progress.complete("downloading_model")
+                except Exception:
+                    progress.fail("downloading_model")
+                    click.echo(
+                        f"Error: Failed to download summarization model '{config.summarization.model}'.\n"
+                        "Check your internet connection and try again.",
+                        err=True,
+                    )
+                    raise SystemExit(1) from None
+            summary = summarizer.summarize(transcript_text)
+            title_slug = _generate_title_slug(summary, summarizer)
+            progress.complete("summarizing")
+    finally:
+        summarizer.close()
 
     summary_md = format_summary(summary)
     summary_path = out_dir / "summary.md"
@@ -438,28 +441,31 @@ def _do_transcribe_and_summarize(
             except ImportError as exc:
                 click.echo(f"Error: {exc}", err=True)
                 raise SystemExit(1) from None
-            if not summarizer.is_available():
-                sum_unavailable = True
-            else:
-                try:
-                    progress.begin("summarizing")
-                    if local_sum:
-                        progress.begin("downloading_model")
-                        _download_summarization_model(
-                            config.summarization.model,
-                            progress,
-                            "downloading_model",
-                        )
-                        progress.complete("downloading_model")
-                    summary = summarizer.summarize(result.full_text)
-                    _, summary_str = _format_output(config, result, summary)
-                    summary_path = out_dir / f"summary.{ext}"
-                    summary_path.write_text(summary_str or summary)
-                    title_slug = _generate_title_slug(summary, summarizer)
-                    progress.complete("summarizing")
-                except Exception:
-                    progress.fail("summarizing")
-                    sum_failed = True
+            try:
+                if not summarizer.is_available():
+                    sum_unavailable = True
+                else:
+                    try:
+                        progress.begin("summarizing")
+                        if local_sum:
+                            progress.begin("downloading_model")
+                            _download_summarization_model(
+                                config.summarization.model,
+                                progress,
+                                "downloading_model",
+                            )
+                            progress.complete("downloading_model")
+                        summary = summarizer.summarize(result.full_text)
+                        _, summary_str = _format_output(config, result, summary)
+                        summary_path = out_dir / f"summary.{ext}"
+                        summary_path.write_text(summary_str or summary)
+                        title_slug = _generate_title_slug(summary, summarizer)
+                        progress.complete("summarizing")
+                    except Exception:
+                        progress.fail("summarizing")
+                        sum_failed = True
+            finally:
+                summarizer.close()
 
     # --- All user-facing output after TUI exits ---
     click.echo(f"Transcript saved to {transcript_path}")

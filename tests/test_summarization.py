@@ -639,6 +639,80 @@ class TestLlamaCppTemplatePassthrough:
         assert "Key Concepts" in call_args[1]["messages"][1]["content"]
 
 
+class TestLlamaCppClose:
+    """Test deterministic cleanup of the local model."""
+
+    def test_close_frees_loaded_model(self, mock_llama):
+        config = SummarizationConfig(backend="local", model="phi-4-mini")
+
+        from ownscribe.summarization.llama_cpp_summarizer import LlamaCppSummarizer
+
+        summarizer = LlamaCppSummarizer(config)
+        summarizer._get_llm()
+        summarizer.close()
+
+        mock_llama.close.assert_called_once()
+        assert summarizer._llm is None
+
+    def test_close_is_idempotent(self, mock_llama):
+        config = SummarizationConfig(backend="local", model="phi-4-mini")
+
+        from ownscribe.summarization.llama_cpp_summarizer import LlamaCppSummarizer
+
+        summarizer = LlamaCppSummarizer(config)
+        summarizer._get_llm()
+        summarizer.close()
+        summarizer.close()
+
+        mock_llama.close.assert_called_once()
+
+    def test_close_without_load_is_noop(self, mock_llama):
+        config = SummarizationConfig(backend="local", model="phi-4-mini")
+
+        from ownscribe.summarization.llama_cpp_summarizer import LlamaCppSummarizer
+
+        summarizer = LlamaCppSummarizer(config)
+        summarizer.close()
+
+        mock_llama.close.assert_not_called()
+
+    def test_close_suppresses_errors(self, mock_llama):
+        mock_llama.close.side_effect = RuntimeError("boom")
+        config = SummarizationConfig(backend="local", model="phi-4-mini")
+
+        from ownscribe.summarization.llama_cpp_summarizer import LlamaCppSummarizer
+
+        summarizer = LlamaCppSummarizer(config)
+        summarizer._get_llm()
+        summarizer.close()
+
+        assert summarizer._llm is None
+
+    def test_context_manager_closes_model(self, mock_llama):
+        config = SummarizationConfig(backend="local", model="phi-4-mini")
+
+        from ownscribe.summarization.llama_cpp_summarizer import LlamaCppSummarizer
+
+        with LlamaCppSummarizer(config) as summarizer:
+            assert summarizer._get_llm() is mock_llama
+
+        mock_llama.close.assert_called_once()
+
+
+class TestSummarizerCloseContract:
+    """Backends without native resources inherit a no-op close + context manager."""
+
+    def test_ollama_close_is_noop_and_context_manager(self):
+        config = SummarizationConfig(host="http://localhost:1", backend="ollama", model="x")
+
+        from ownscribe.summarization.ollama_summarizer import OllamaSummarizer
+
+        summarizer = OllamaSummarizer(config)
+        with summarizer as entered:
+            assert entered is summarizer
+        summarizer.close()
+
+
 class TestEnsureModel:
     """Test _ensure_model with various model specifications."""
 

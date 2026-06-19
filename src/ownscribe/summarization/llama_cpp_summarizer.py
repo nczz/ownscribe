@@ -108,12 +108,23 @@ class LlamaCppSummarizer(Summarizer):
         self._templates = templates or {}
         self._llm: Llama | None = None
 
-    def __del__(self) -> None:
-        """Ensure the model is properly closed on cleanup."""
-        llm = getattr(self, "_llm", None)
+    def close(self) -> None:
+        """Free the loaded model deterministically. Idempotent."""
+        llm = self._llm
+        self._llm = None
         if llm is not None:
-            with contextlib.suppress(Exception):
+            # Plain try/except, not contextlib.suppress: this runs from __del__ at
+            # interpreter shutdown when the `contextlib` global is already None.
+            try:  # noqa: SIM105
                 llm.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:
+        try:  # noqa: SIM105
+            self.close()
+        except Exception:
+            pass
 
     def _get_llm(self) -> Llama:
         """Lazy-load the model on first use."""
