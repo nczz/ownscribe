@@ -238,6 +238,31 @@ def apps() -> None:
     click.echo(recorder.list_apps())
 
 
+@cli.command()
+@click.option("--device", default=None, type=int, help="Mic device index for live preview.")
+@click.option("--lang", default="zh", help="Language: zh, en, auto.")
+@click.option("--no-record", is_flag=True, help="Only show live subtitles, skip recording.")
+@click.pass_context
+def live(ctx: click.Context, device: int | None, lang: str, no_record: bool) -> None:
+    """即時會議模式：邊開會邊看字幕，結束後自動產出帶說話者的完整記錄。
+
+    \b
+    同時執行：
+    1. 即時串流辨識（paraformer-zh-streaming，~600ms 延遲）
+    2. 系統音訊+麥克風錄音（Core Audio）
+    3. Ctrl+C 結束後 → SenseVoice + CAM++ 精確轉錄 + 說話者辨識
+
+    \b
+    範例：
+        ownscribe live              # 中文即時字幕 + 錄音 + 會後轉錄
+        ownscribe live --lang en    # 英文模式
+        ownscribe live --no-record  # 只看即時字幕，不錄音
+    """
+    config = ctx.obj["config"]
+    from ownscribe.pipeline_live import run_live_pipeline
+    run_live_pipeline(config, mic_device=device, language=lang, record=not no_record)
+
+
 @cli.command("config")
 def config_cmd() -> None:
     """Open the configuration file in your editor."""

@@ -24,6 +24,8 @@ model = "base"            # whisper model: tiny, base, small, medium, large-v3
 language = ""             # empty = auto-detect
 # initial_prompt = ""     # prime Whisper with context: domain vocab, speaker names, expected phrases
 # hotwords = ""           # comma-separated words to boost recognition (softer hint than initial_prompt)
+# asr_backend = "whisperx"  # "whisperx" (default) or "funasr" (better Chinese, built-in diarization)
+# funasr_model = "sensevoice"  # "sensevoice" (fastest, multilingual), "paraformer" (Chinese + timestamps)
 
 [diarization]
 enabled = false           # set to true + provide hf_token to enable
@@ -70,6 +72,9 @@ class TranscriptionConfig:
     language: str = ""
     initial_prompt: str = ""
     hotwords: str = ""
+    asr_backend: str = "whisperx"  # "whisperx" (default) or "funasr" or "firered" or "breeze"
+    funasr_model: str = "sensevoice"  # "sensevoice", "paraformer", "paraformer-en"
+    models_dir: str = "~/.cache/ownscribe/models"  # unified model storage directory
 
 
 @dataclass
@@ -175,6 +180,55 @@ def _merge_toml(config: Config, data: dict) -> Config:
             )
 
     return config
+
+
+@dataclass
+class FunASRConfig:
+    """Configuration for the FunASR transcription backend.
+
+    This is an alternative to TranscriptionConfig + DiarizationConfig,
+    providing a unified pipeline with better Chinese recognition.
+    """
+
+    model: str = "sensevoice"  # "sensevoice", "paraformer", "paraformer-en", or full model ID
+    language: str = ""  # "" = auto-detect; "zh", "en", "ja", "ko", "yue"
+    device: str = "cpu"  # "cpu" or "cuda"
+    spk_enabled: bool = True  # Enable CAM++ speaker diarization (no HF token needed)
+    batch_size_s: int = 300  # Seconds per batch (higher = more memory, faster)
+    hotwords: str = ""  # Comma-separated hotwords (Paraformer SeACo only)
+    traditional_chinese: bool = True  # Convert output to Traditional Chinese (Taiwan)
+
+
+def resolve_model_path(name: str, models_dir: str | None = None) -> Path:
+    """Resolve a model name to its local path.
+
+    Looks in the project's models/ directory first, then the configured models_dir,
+    then falls back to the name itself (for ModelScope/HuggingFace auto-download IDs).
+
+    Usage:
+        path = resolve_model_path("sensevoice")
+        path = resolve_model_path("breeze-asr-25")
+        path = resolve_model_path("firered-asr2-aed")
+    """
+    # 1. Project models/ directory (follows symlinks)
+    project_models = Path(__file__).parent.parent.parent / "models"
+    local = project_models / name
+    if local.exists():
+        return local.resolve()  # resolve symlinks to actual path
+
+    # 2. Configured models_dir
+    if models_dir:
+        configured = Path(models_dir).expanduser() / name
+        if configured.exists():
+            return configured.resolve()
+
+    # 3. Maybe it's already an absolute path
+    p = Path(name).expanduser()
+    if p.exists():
+        return p
+
+    # 4. Return name as-is (will be treated as a ModelScope/HuggingFace ID for auto-download)
+    return Path(name)
 
 
 def ensure_config_file() -> Path:

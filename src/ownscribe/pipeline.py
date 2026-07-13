@@ -91,7 +91,38 @@ def _create_recorder(config: Config):
 
 
 def _create_transcriber(config: Config, progress=None):
-    """Create the WhisperX transcriber."""
+    """Create the appropriate transcriber based on config.
+
+    Supports four backends:
+    - "whisperx" (default): WhisperX + optional pyannote diarization
+    - "funasr": FunASR + CAM++ (better Chinese, built-in diarization)
+    - "firered": FireRedASR2-AED + CAM++ (best Chinese accuracy, ~2.3x realtime MPS)
+    - "breeze": Breeze-ASR-25 + CAM++ (Taiwanese Mandarin + code-switching, native 繁體)
+    """
+    asr_backend = getattr(config.transcription, "asr_backend", "whisperx")
+
+    if asr_backend == "breeze":
+        from ownscribe.transcription.breeze_transcriber import BreezeTranscriber
+
+        return BreezeTranscriber(progress=progress, use_mps=True)
+
+    if asr_backend == "firered":
+        from ownscribe.transcription.firered_transcriber import FireRedTranscriber
+
+        return FireRedTranscriber(progress=progress, use_mps=True)
+
+    if asr_backend == "funasr":
+        from ownscribe.config import FunASRConfig
+        from ownscribe.transcription.funasr_transcriber import FunASRTranscriber
+
+        funasr_config = FunASRConfig(
+            model=getattr(config.transcription, "funasr_model", "sensevoice"),
+            language=config.transcription.language,
+            spk_enabled=config.diarization.enabled,
+        )
+        return FunASRTranscriber(funasr_config, progress=progress)
+
+    # Default: WhisperX
     from ownscribe.transcription.whisperx_transcriber import WhisperXTranscriber
 
     diar_config = config.diarization if config.diarization.enabled else None

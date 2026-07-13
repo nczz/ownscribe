@@ -26,6 +26,9 @@ wheels/
 # Compiled binaries
 bin/
 
+# Model weights (downloaded locally, not committed)
+models/
+
 # Swift build artifacts
 swift/.build/
 
