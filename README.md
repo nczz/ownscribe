@@ -1,292 +1,302 @@
-# ownscribe
+# ownscribe (Chinese ASR Fork)
 
-[![PyPI](https://img.shields.io/pypi/v/ownscribe)](https://pypi.org/project/ownscribe/)
-[![CI](https://github.com/paberr/ownscribe/actions/workflows/ci.yml/badge.svg)](https://github.com/paberr/ownscribe/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![macOS 26+](https://img.shields.io/badge/macOS-26+-black?logo=apple)](https://developer.apple.com/macos/)
 
-Local-first meeting transcription and summarization CLI.
-Record, transcribe, and summarize meetings and system audio entirely on your machine – no cloud, no bots, no data leaving your device.
+> Fork of [paberr/ownscribe](https://github.com/paberr/ownscribe) v0.13.0 — extended with multi-backend Chinese ASR, real-time transcription, and speaker diarization optimized for **Taiwanese Mandarin + English code-switching**.
 
-> System audio capture requires **macOS 14.2 or later**. Other platforms can use the sounddevice backend with an external audio source.
+本地端會議記錄工具，專為**台灣中文 + 中英混合**會議場景設計。即時字幕、錄音保存、說話者辨識、繁體中文輸出 — 全部在你的 Mac 上完成，不上雲。
 
-## Table of Contents
+---
 
-- [Privacy](#privacy)
-- [Features](#features)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Summarization Templates](#summarization-templates)
-- [Speaker Diarization](#speaker-diarization)
-- [Acknowledgments](#acknowledgments)
-- [Contributing](#contributing)
-- [License](#license)
+## 與原專案的差異
 
-## Privacy
+| | 原版 ownscribe | 本 Fork |
+|---|---|---|
+| ASR 引擎 | WhisperX（中文 CER ~20%） | **4 後端可選**（最低 CER 3%） |
+| 中文優化 | 無 | ✅ 台灣國語 + 中英混合 + 方言 |
+| 繁體輸出 | 無 | ✅ 原生繁體 / OpenCC 轉換 |
+| 即時字幕 | 無 | ✅ `ownscribe live` |
+| 說話者辨識 | pyannote（需 HF token） | ✅ CAM++（免 token） |
+| 原有功能 | — | 100% 保留，向後相容 |
 
-ownscribe **does not**:
+---
 
-- send audio to external servers
-- upload transcripts
-- require cloud APIs
-- store data outside your machine
+## 功能特色
 
-All audio, transcripts, and summaries remain local.
+- 🎙️ **即時會議模式** — 邊開會邊看繁體字幕，結束後自動產出帶說話者的完整記錄
+- 🇹🇼 **台灣國語最佳化** — Breeze-ASR-25 專為台灣中文 + 中英混合訓練
+- 👥 **說話者辨識** — CAM++ 自動辨識誰在說話，不需要 HuggingFace token
+- 🔒 **完全地端** — 所有音訊、轉錄、模型都在本機，不上傳任何資料
+- ⚡ **Apple Silicon 加速** — MPS GPU 加速，M1 Pro 以上流暢運作
 
-<p align="center">
-  <img src="docs/demo-pipeline.gif" alt="ownscribe demo" width="750">
-</p>
+---
 
-## Features
+## ASR 模型比較
 
-- **System audio capture** — records all system audio natively via Core Audio Taps (macOS 14.2+), no virtual audio drivers needed
-- **Microphone capture** — optionally record system + mic audio simultaneously with `--mic`
-- **WhisperX transcription** — fast, accurate speech-to-text with word-level timestamps
-- **Speaker diarization** — optional speaker identification via pyannote (requires HuggingFace token)
-- **Pipeline progress** — live checklist showing transcription, diarization sub-steps, and summarization progress
-- **Local LLM summarization** — structured meeting notes with a built-in model (Phi-4-mini); also supports Ollama, LM Studio, or any OpenAI-compatible server
-- **Summarization templates** — built-in presets for meetings, lectures, and quick briefs; define your own in config
-- **Ask your meetings** — ask natural-language questions across all your meeting notes; uses a two-stage LLM pipeline with keyword fallback
-  <br><img src="docs/demo-ask.gif" alt="ownscribe ask demo" width="700">
-- **Silence auto-stop** — automatically stops recording after sustained silence (default: 5 minutes, configurable)
-- **One command** — just run `ownscribe`, press Ctrl+C when done, get transcript + summary
+| 後端 | 模型 | 中文 CER | 速度 (M5 Pro) | 繁體 | 說話者辨識 | 最適合 |
+|------|------|---------|--------------|------|-----------|--------|
+| `breeze` ⭐ | MediaTek Breeze-ASR-25 + CAM++ | ~8% | 5.2x (MPS) | ✅ 原生 | ✅ | **台灣中英混合會議** |
+| `firered` | FireRedASR2-AED + CAM++ | **3.05%** | 2.3x (MPS) | OpenCC | ✅ | 最高中文準確度 |
+| `funasr` | FunASR SenseVoice + CAM++ | 7.81% | 17x (CPU) | OpenCC | ✅ | 快速處理、低資源 |
+| `whisperx` | WhisperX + pyannote | ~20% | 13x | ❌ | ✅ | 英文 / 原有行為 |
 
-## Requirements
+---
 
-- macOS 14.2+ (for system audio capture)
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/)
-- [ffmpeg](https://ffmpeg.org/) — `brew install ffmpeg`
-- Xcode Command Line Tools (`xcode-select --install`)
+## 系統需求
 
-Summarization works out of the box — a local model (Phi-4-mini, ~2.4 GB) downloads automatically on first run. Optionally, you can use [Ollama](https://ollama.ai), [LM Studio](https://lmstudio.ai), or any OpenAI-compatible server instead (see [Configuration](#configuration)).
+| 需求 | 最低 | 建議 |
+|------|------|------|
+| macOS | 26.0+ | 26.0+ |
+| 晶片 | Apple M1 | M3 Pro 以上 |
+| RAM | 16 GB | 32 GB+ |
+| 磁碟 | 20 GB（Breeze 方案） | 30 GB+（全裝） |
+| Python | 3.12+ | 3.12+ |
 
-Works with any app that outputs audio through Core Audio (Zoom, Teams, Meet, etc.).
+---
 
-> **Tip:** Your terminal app (Terminal, iTerm2, VS Code, etc.) needs **Screen Recording** permission to capture system audio.
-> Open the settings panel directly with:
-> ```bash
-> open "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
-> ```
-> Enable your terminal app, then restart it.
+## 安裝
 
-## Installation
-
-### Quick start with uvx
+### 1. Clone 並建立環境
 
 ```bash
-uvx ownscribe
-```
-
-On macOS, the Swift audio capture helper is downloaded automatically on first run.
-
-### Alternative summarization backends
-
-The built-in local model works out of the box. If you'd rather call a hosted backend, install the matching extra:
-
-```bash
-uv add 'ownscribe[ollama]'   # use Ollama
-uv add 'ownscribe[openai]'   # use any OpenAI-compatible server (LM Studio, llama-server, etc.)
-uv add 'ownscribe[all]'      # install both
-```
-
-### From source
-
-```bash
-# Clone the repo
-git clone https://github.com/paberr/ownscribe.git
+git clone git@github.com:nczz/ownscribe.git
 cd ownscribe
-
-# Build the Swift audio capture helper (optional - auto-downloads if skipped)
-bash swift/build.sh
-
-# Install with all backends
-uv sync --extra all
+brew install uv ffmpeg
+uv venv --python 3.12
+source .venv/bin/activate
+uv pip install -e ".[all]"
 ```
 
-When installed from source, the `ownscribe` command lives inside the project's
-virtual environment, so run it with `uv run` from the repo directory:
+### 2. 安裝中文 ASR 依賴
 
 ```bash
-uv run ownscribe          # equivalent to the bare `ownscribe` used below
+# FunASR（即時串流 + SenseVoice + CAM++ 說話者辨識）
+uv pip install funasr modelscope opencc-python-reimplemented
+
+# Breeze-ASR-25（台灣中文 + 中英混合）— 需要 transformers
+uv pip install transformers
 ```
 
-Alternatively, activate the environment once (`source .venv/bin/activate`) and
-then call `ownscribe` directly. The examples in [Usage](#usage) use the bare
-`ownscribe` form, which works after activation or via `uvx ownscribe`.
-
-## Usage
-
-### Record, transcribe, and summarize a meeting
+### 3. 下載模型
 
 ```bash
-ownscribe                    # records system audio, Ctrl+C to stop
+# 下載到專案 models/ 目錄
+python -c "
+from huggingface_hub import snapshot_download
+
+# FunASR 基礎元件（VAD + 說話者辨識 + 標點 + 即時串流）
+for repo, name in [
+    ('FunAudioLLM/SenseVoiceSmall', 'models/sensevoice'),
+    ('funasr/fsmn-vad', 'models/fsmn-vad'),
+    ('funasr/ct-punc', 'models/ct-punc'),
+    ('funasr/campplus', 'models/campplus'),
+    ('funasr/paraformer-zh-streaming', 'models/paraformer-zh-streaming'),
+]:
+    print(f'Downloading {repo}...')
+    snapshot_download(repo, local_dir=name)
+
+# Breeze-ASR-25（台灣中文主模型）
+print('Downloading Breeze-ASR-25...')
+snapshot_download('MediaTek-Research/Breeze-ASR-25', local_dir='models/breeze-asr-25')
+print('Done!')
+"
 ```
 
-This will:
-1. Capture system audio until you press Ctrl+C (or auto-stop after 5 minutes of silence)
-2. Transcribe with WhisperX
-3. Summarize with your local LLM
-4. Save everything to `~/ownscribe/YYYY-MM-DD_HHMMSS/`
-
-> **Note:** By default, macOS shows a source picker on each launch so you can choose what to capture. To skip it and always record all system audio, set `capture_mode = "all"` in the `[audio]` config section.
-
-On first run, WhisperX / pyannote and the summarization model may download model files. ownscribe shows a `Preparing models` step and best-effort download progress in the TUI while this happens. Use `ownscribe warmup` to pre-download all models.
-
-### Options
+### 4. 設定
 
 ```bash
-ownscribe --mic                               # capture system audio + default mic (press 'm' to mute/unmute)
-ownscribe --mic-device "MacBook Pro Microphone" # capture system audio + specific mic
-ownscribe --device "MacBook Pro Microphone"   # use mic instead of system audio
-ownscribe --no-summarize                      # skip LLM summarization
-ownscribe --diarize                           # enable speaker identification
-ownscribe --language en                       # set transcription language (default: auto-detect)
-ownscribe --model large-v3                    # use a larger Whisper model
-ownscribe --format json                       # output as JSON instead of markdown
-ownscribe --no-keep-recording                 # auto-delete WAV files after transcription
-ownscribe --template lecture                  # use the lecture summarization template
-ownscribe --silence-timeout 600               # auto-stop after 10 minutes of silence
-ownscribe --silence-timeout 0                 # disable silence auto-stop
-```
-
-### Subcommands
-
-```bash
-ownscribe devices                  # list audio devices (uses native CoreAudio when available)
-ownscribe apps                     # list running apps with PIDs for use with --pid
-ownscribe warmup                   # prefetch WhisperX/pyannote models before a meeting
-ownscribe transcribe recording.wav # transcribe an audio or video file: wav/mp3/mp4/mov/mkv (saved alongside)
-ownscribe summarize transcript.md  # summarize a transcript (saves alongside the input)
-ownscribe resume ./2026-02-20_1736 # resume a partial run, or process a folder's audio/video recording
-ownscribe ask "question"           # search your meetings with a natural-language question
-ownscribe config                   # open config file in $EDITOR
-ownscribe cleanup                  # remove ownscribe data from disk
-```
-
-> **Video files work too.** Anywhere ownscribe accepts an audio file it also accepts a video container (mp4, mov, mkv, m4v) — it extracts the audio track via ffmpeg. To turn a recording into full notes, drop it in a folder and run `ownscribe resume ./that-folder/` (transcript + summary); use `ownscribe transcribe meeting.mp4` for a transcript only.
-
-Use `warmup` ahead of time to avoid first-run model download delays while recording:
-
-```bash
-ownscribe warmup                    # prefetch Whisper model (+ diarization if enabled in config)
-ownscribe warmup --language en      # also prefetch alignment model for English
-ownscribe warmup --with-diarization # force diarization warmup for this run
-```
-
-### Searching Meeting Notes
-
-Use `ask` to search across all your meeting notes with natural-language questions:
-
-```bash
-ownscribe ask "What did Anna say about the deadline?"
-ownscribe ask "budget decisions" --since 2026-01-01
-ownscribe ask "action items from last week" --limit 5
-```
-
-This runs a two-stage pipeline:
-1. **Find** — sends meeting summaries to the LLM to identify which meetings are relevant
-2. **Answer** — sends the full transcripts of relevant meetings to the LLM to produce an answer with quotes
-
-If the LLM finds no relevant meetings, a keyword fallback searches summaries and transcripts directly.
-
-## Configuration
-
-Config is stored at `~/.config/ownscribe/config.toml`. Run `ownscribe config` to create and edit it.
-
-```toml
+mkdir -p ~/.config/ownscribe
+cat > ~/.config/ownscribe/config.toml << 'EOF'
 [audio]
-backend = "coreaudio"     # "coreaudio" or "sounddevice"
-device = ""               # empty = system audio
-mic = false               # also capture microphone input
-mic_device = ""           # specific mic device name (empty = default)
-capture_mode = "picker"   # "picker" = show source picker; "all" = capture all system audio directly
-silence_timeout = 300     # seconds of silence before auto-stop; 0 = disabled
+backend = "coreaudio"
+mic = true
+capture_mode = "all"
+silence_timeout = 600
 
 [transcription]
-model = "base"            # tiny, base, small, medium, large-v3
-language = ""             # empty = auto-detect
-# initial_prompt = ""     # prime Whisper with context: domain vocab, speaker names, expected phrases
-# hotwords = ""           # comma-separated words to boost recognition (softer hint than initial_prompt)
+asr_backend = "breeze"
+language = ""
 
 [diarization]
-enabled = false
-hf_token = ""             # HuggingFace token for pyannote
-telemetry = false         # allow HuggingFace Hub + pyannote metrics telemetry
-device = "auto"           # "auto" (mps if available), "mps", or "cpu"
+enabled = true
 
 [summarization]
-enabled = true
-backend = "local"         # "local" (built-in, no server needed), "ollama", or "openai"
-model = "phi-4-mini"      # local: "phi-4-mini", path to GGUF, or hf:owner/repo/file.gguf; ollama/openai: model name
-# host = "http://localhost:11434"  # only for ollama/openai backends
-# api_key = ""            # only for openai backend; required by servers like oMLX (or set OPENAI_API_KEY)
-# template = "meeting"    # "meeting", "lecture", "brief", or a custom name
-# context_size = 0        # 0 = auto-detect from model; set manually for OpenAI-compatible backends
-
-# Custom templates (optional):
-# [templates.my-standup]
-# system_prompt = "You summarize daily standups."
-# prompt = "List each person's update:\n{transcript}"
+enabled = false
 
 [output]
 dir = "~/ownscribe"
-format = "markdown"       # "markdown" or "json"
-keep_recording = true     # false = auto-delete WAV after transcription
+format = "markdown"
+keep_recording = true
+EOF
 ```
 
-**Precedence:** CLI flags > environment variables (`HF_TOKEN`, `OLLAMA_HOST`, `OPENAI_API_KEY`) > config file > defaults.
+### 5. macOS 權限
 
-## Summarization Templates
+系統設定 → 隱私權與安全性 → 螢幕錄製 → 啟用你的終端 app（Terminal/iTerm2/VS Code），然後重啟終端。
 
-Built-in templates control how transcripts are summarized:
+---
 
-| Template | Best for | Output style |
-|----------|----------|-------------|
-| `meeting` | Meetings, standups, 1:1s | Summary, Key Points, Action Items, Decisions |
-| `lecture` | Lectures, seminars, talks | Summary, Key Concepts, Key Takeaways |
-| `brief` | Quick overviews | 3-5 bullet points |
+## 使用方式
 
-Use `--template` on the CLI or set `template` in `[summarization]` config. Default is `meeting`.
+### 即時會議模式（推薦）
 
-Define custom templates in config:
+```bash
+ownscribe live
+```
+
+一個指令同時做：
+1. ✅ 即時繁體字幕（paraformer-zh-streaming，~600ms 延遲）
+2. ✅ 系統音訊 + 麥克風錄音
+3. ✅ Ctrl+C 結束後 → Breeze-ASR-25 精修 + CAM++ 說話者辨識
+4. ✅ 輸出 `~/ownscribe/YYYY-MM-DD_HHMM/transcript.md`
+
+```
+⏳ 載入即時辨識模型...
+✅ 即時辨識模型就緒
+📁 錄音將存到: ~/ownscribe/2026-07-13_1400/recording.wav
+
+============================================================
+🎙️  即時會議模式 (Ctrl+C 結束)
+   ✅ 即時字幕  ✅ 錄音中  ✅ 會後轉錄
+============================================================
+
+  [0:00:03] 好各位今天的會議主要討論
+  [0:00:06] Q3 產品計畫
+  [0:00:09] 核心功能已完成約百分之八十
+  ^C
+
+🔄 開始精確轉錄（breeze + 說話者辨識）...
+✅ 轉錄完成！
+📄 逐字稿: ~/ownscribe/2026-07-13_1400/transcript.md
+   說話者: 3 人
+   總句數: 42
+```
+
+### 轉錄已有錄音
+
+```bash
+ownscribe transcribe ~/path/to/meeting.wav
+```
+
+### 只看即時字幕（不錄音）
+
+```bash
+ownscribe live --no-record
+```
+
+### 切換 ASR 後端
+
+編輯 `~/.config/ownscribe/config.toml`：
 
 ```toml
-[templates.my-standup]
-system_prompt = "You summarize daily standups."
-prompt = "List each person's update:\n{transcript}"
+[transcription]
+asr_backend = "firered"   # 要最高中文準確度時
+# asr_backend = "breeze"  # 台灣中英混合（預設）
+# asr_backend = "funasr"  # 最快、低資源
 ```
 
-Then use with `--template my-standup` or `template = "my-standup"` in config.
+### 搜尋歷史會議
 
-## Speaker Diarization
+```bash
+ownscribe ask "上次討論的 deadline 是什麼時候？"
+```
 
-Speaker identification requires a HuggingFace token with access to the pyannote diarization model:
+---
 
-1. Accept the terms for [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) on HuggingFace
-2. Create a token at https://huggingface.co/settings/tokens
-3. Set `HF_TOKEN` env var or add `hf_token` to config
-4. Run with `--diarize`
+## 模型詳細說明
 
-On Apple Silicon Macs, diarization automatically uses the Metal Performance Shaders (MPS) GPU backend for ~10x faster processing. Set `device = "cpu"` in the `[diarization]` config section to disable this.
+### Breeze-ASR-25（預設）
 
-## Acknowledgments
+MediaTek Research 開發，專為台灣國語 + 中英混合優化。基於 Whisper-large-v2 微調。
 
-ownscribe builds on some excellent open-source projects:
+- **原生繁體中文輸出**
+- 中英混合辨識超強（改善 56% vs Whisper）
+- 李宏毅教授指導、NVIDIA Taipei-1 超算訓練
+- Apache 2.0 授權
+- [HuggingFace](https://huggingface.co/MediaTek-Research/Breeze-ASR-25) | [Paper](https://arxiv.org/abs/2506.11130)
 
-- [WhisperX](https://github.com/m-bain/whisperX) — fast speech recognition with word-level timestamps and speaker diarization
-- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2-based Whisper inference
-- [pyannote.audio](https://github.com/pyannote/pyannote-audio) — speaker diarization
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) / [llama-cpp-python](https://github.com/abetlen/llama-cpp-python) — local LLM inference
-- [Ollama](https://ollama.ai) — local LLM serving
-- [Click](https://click.palletsprojects.com) — CLI framework
+### FireRedASR2-AED（最精確）
 
-## Contributing
+小紅書 FireRed Team 開發，2026 年中文 ASR 公開基準冠軍。
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, tests, and open contribution areas.
+- CER 3.05%（超越 Qwen3-ASR、FunASR、Doubao）
+- 支援 20+ 中國方言
+- 內建 VAD + LID + 標點
+- 需要 monkey-patch 才能在 Apple MPS 上跑
+- Apache 2.0 授權
+- [HuggingFace](https://huggingface.co/FireRedTeam/FireRedASR2-AED) | [GitHub](https://github.com/FireRedTeam/FireRedASR2S)
+
+### FunASR SenseVoice（最快）
+
+阿里巴巴通義實驗室開發，非自回歸架構，CPU 也能 17x realtime。
+
+- CER 7.81%（比 Whisper 好一倍以上）
+- CAM++ 說話者辨識內建
+- 支援情緒偵測、語言辨識
+- MIT 授權
+- [GitHub](https://github.com/modelscope/FunASR) | [HuggingFace](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)
+
+---
+
+## 說話者辨識
+
+使用 FunASR 的 **CAM++** 模型，完全不需要 HuggingFace token：
+
+1. FSMN-VAD 切出語音區段
+2. CAM++ 對每段提取 speaker embedding（192 維向量）
+3. Cosine similarity 聚類（threshold 0.7）
+4. 時間戳對齊到 ASR 結果的每個句子
+
+---
+
+## 即時串流辨識
+
+使用 FunASR 的 `paraformer-zh-streaming`：
+
+- 600ms chunk，~600ms 延遲
+- CPU 即可即時處理
+- 透過 OpenCC `s2twp` 即時轉繁體
+- 獨立於會後精修引擎（互不干擾）
+
+---
+
+## 專案結構
+
+```
+src/ownscribe/
+├── audio/                    錄音層（Core Audio / sounddevice）
+├── transcription/            ASR 層（4 後端）
+│   ├── base.py                  Transcriber 抽象介面
+│   ├── whisperx_transcriber.py  原有 WhisperX
+│   ├── funasr_transcriber.py    FunASR SenseVoice + CAM++
+│   ├── breeze_transcriber.py    Breeze-ASR-25 + CAM++
+│   └── firered_transcriber.py   FireRedASR2-AED + CAM++
+├── summarization/            LLM 摘要層
+├── output/                   Markdown / JSON 輸出
+├── pipeline.py               主 pipeline
+├── pipeline_live.py          即時會議 pipeline
+├── cli.py                    CLI 入口
+└── config.py                 設定 + 模型路徑管理
+
+models/                       模型目錄（gitignored）
+```
+
+詳細架構見 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+---
+
+## 致謝
+
+- **[paberr/ownscribe](https://github.com/paberr/ownscribe)** — 本專案的基礎，由 Pascal Berrang 開發（MIT License）
+- **[MediaTek Research](https://huggingface.co/MediaTek-Research)** — Breeze-ASR-25 模型
+- **[FireRed Team](https://huggingface.co/FireRedTeam)** — FireRedASR2 模型
+- **[FunAudioLLM / Tongyi Lab](https://github.com/modelscope/FunASR)** — FunASR、SenseVoice、CAM++
+- **[OpenCC](https://github.com/BYVoid/OpenCC)** — 簡繁轉換
+
+---
 
 ## License
 
-MIT
+MIT — 與原專案相同。見 [LICENSE](LICENSE)。
