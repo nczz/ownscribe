@@ -61,13 +61,26 @@ class BreezeTranscriber(Transcriber):
         """Load FunASR VAD + CAM++ for speaker diarization."""
         from funasr import AutoModel
 
+        vad_path = resolve_model_path("fsmn-vad")
+        spk_path = resolve_model_path("campplus")
+
+        if not vad_path.exists() or not spk_path.exists():
+            missing = []
+            if not vad_path.exists():
+                missing.append("fsmn-vad")
+            if not spk_path.exists():
+                missing.append("campplus")
+            raise RuntimeError(
+                f"Speaker diarization models not found: {', '.join(missing)}\n"
+                f"Download them with:\n"
+                f"  python -c \"from huggingface_hub import snapshot_download; "
+                f"snapshot_download('funasr/fsmn-vad', local_dir='models/fsmn-vad'); "
+                f"snapshot_download('funasr/campplus', local_dir='models/campplus')\""
+            )
+
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            self._vad_model = AutoModel(
-                model=str(resolve_model_path("fsmn-vad")), disable_update=True
-            )
-            self._spk_model = AutoModel(
-                model=str(resolve_model_path("campplus")), disable_update=True
-            )
+            self._vad_model = AutoModel(model=str(vad_path), disable_update=True)
+            self._spk_model = AutoModel(model=str(spk_path), disable_update=True)
 
     def _load_asr_model(self) -> None:
         """Load Breeze-ASR-25 model."""
