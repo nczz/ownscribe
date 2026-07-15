@@ -202,6 +202,30 @@ class TestDoTranscribeAndSummarize:
         assert (tmp_path / "transcript.md").exists()
         assert not (tmp_path / "summary.md").exists()
 
+    def test_community_diarization_runs_after_transcription(self, tmp_path):
+        from ownscribe.pipeline import _do_transcribe_and_summarize
+
+        config = Config()
+        config.diarization.enabled = True
+        config.diarization.backend = "community"
+        config.diarization.hf_token = "hf_test"
+        audio_path = tmp_path / "recording.wav"
+        audio_path.touch()
+        transcript = self._make_transcript()
+        mock_transcriber = mock.MagicMock()
+        mock_transcriber.transcribe.return_value = transcript
+        mock_diarizer = mock.MagicMock()
+        mock_diarizer.diarize.return_value = transcript
+
+        with (
+            mock.patch("ownscribe.pipeline._create_transcriber", return_value=mock_transcriber),
+            mock.patch("ownscribe.transcription.community_diarizer.CommunityDiarizer", return_value=mock_diarizer),
+        ):
+            _do_transcribe_and_summarize(config, audio_path, tmp_path, summarize=False)
+
+        mock_diarizer.diarize.assert_called_once_with(audio_path, transcript)
+        mock_diarizer.close.assert_called_once()
+
     def test_transcribe_and_summarize(self, tmp_path):
         from ownscribe.pipeline import _do_transcribe_and_summarize
 

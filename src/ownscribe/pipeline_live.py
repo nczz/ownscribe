@@ -252,10 +252,9 @@ def _create_live_recorder(config: Config):
 
 def _post_transcribe(config: Config, audio_path: Path, out_dir: Path) -> None:
     """Run post-meeting accurate transcription using the configured backend."""
-    from ownscribe.pipeline import _create_transcriber, _format_output
+    from ownscribe.pipeline import _format_output, _transcribe_audio
 
-    transcriber = _create_transcriber(config)
-    result = transcriber.transcribe(audio_path)
+    result = _transcribe_audio(config, audio_path)
 
     # Save transcript
     transcript_str, _ = _format_output(config, result)

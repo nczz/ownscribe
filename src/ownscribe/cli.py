@@ -33,7 +33,7 @@ def _dir_size(path: str) -> str:
 @click.group(invoke_without_command=True)
 @click.option("--device", default=None, help="Audio input device name or index.")
 @click.option("--no-summarize", is_flag=True, help="Skip LLM summarization.")
-@click.option("--diarize", is_flag=True, help="Enable speaker diarization (needs HF token).")
+@click.option("--diarize", is_flag=True, help="Enable local speaker diarization.")
 @click.option("--format", "output_format", type=click.Choice(["markdown", "json"]), default=None, help="Output format.")
 @click.option("--model", default=None, help="Whisper model size (tiny, base, small, medium, large-v3).")
 @click.option("--language", default=None, help="Language code for transcription (e.g. en, de, fr).")
@@ -180,7 +180,7 @@ def warmup(
     language: str | None,
     with_diarization: bool | None,
 ) -> None:
-    """Prefetch WhisperX/pyannote models to avoid first-run stalls."""
+    """Prefetch configured transcription and diarization models."""
     config = ctx.obj["config"]
     if model:
         config.transcription.model = model

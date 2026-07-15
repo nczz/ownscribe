@@ -31,13 +31,19 @@ language = ""             # empty = auto-detect
 # chunk_seconds = 60          # bounded-memory decode window; must be >= 30
 
 [diarization]
-enabled = false           # set to true + provide hf_token to enable
+enabled = false           # speaker diarization is opt-in
 hf_token = ""             # HuggingFace token for pyannote models
+backend = "auto"          # Community-1 with token; native backend diarization otherwise
 min_speakers = 0          # 0 = auto-detect
-max_speakers = 0
+max_speakers = 8          # global safety cap; set 0 for no upper bound
 telemetry = false         # set to true to allow HuggingFace Hub + pyannote metrics telemetry
-device = "auto"           # "auto" (mps if available), "mps", or "cpu"
+device = "cpu"            # Community-1 is most reliable on CPU; MPS is experimental
 speaker_threshold = 0.7    # CAM++ cosine threshold for Breeze/FireRed
+window_seconds = 600       # bounded Community-1 window
+window_overlap_seconds = 30
+community_speaker_threshold = 0.55
+segmentation_batch_size = 4
+embedding_batch_size = 8
 
 [summarization]
 enabled = true
@@ -87,11 +93,17 @@ class TranscriptionConfig:
 class DiarizationConfig:
     enabled: bool = False
     hf_token: str = ""
+    backend: str = "auto"
     min_speakers: int = 0
-    max_speakers: int = 0
+    max_speakers: int = 8
     telemetry: bool = False
-    device: str = "auto"
+    device: str = "cpu"
     speaker_threshold: float = 0.7
+    window_seconds: int = 600
+    window_overlap_seconds: int = 30
+    community_speaker_threshold: float = 0.55
+    segmentation_batch_size: int = 4
+    embedding_batch_size: int = 8
 
 
 @dataclass

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import re
 import select
@@ -27,6 +28,56 @@ from ownscribe.summarization import create_summarizer
 # A standard WAV file header (RIFF + fmt + data chunk header) is 44 bytes.
 # Files at or below this size contain no audio frames.
 _WAV_HEADER_SIZE = 44
+
+
+def _uses_community_diarization(config: Config) -> bool:
+    if not config.diarization.enabled:
+        return False
+    backend = config.diarization.backend
+    if backend not in {"auto", "native", "community"}:
+        raise ValueError("diarization.backend must be one of: auto, native, community")
+    if backend == "community" and not config.diarization.hf_token:
+        raise ValueError("Community-1 diarization requires HF_TOKEN or diarization.hf_token")
+    return backend == "community" or (backend == "auto" and bool(config.diarization.hf_token))
+
+
+def _release_model_owner(owner) -> None:
+    close = getattr(owner, "close", None)
+    if callable(close):
+        close()
+
+
+def _collect_model_memory() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except ImportError:
+        pass
+
+
+def _transcribe_audio(config: Config, audio_path: Path, progress=None):
+    """Transcribe audio and apply the configured shared diarization pipeline."""
+    community_enabled = _uses_community_diarization(config)
+    transcriber = _create_transcriber(config, progress=progress)
+    try:
+        result = transcriber.transcribe(audio_path)
+    finally:
+        _release_model_owner(transcriber)
+        transcriber = None
+        _collect_model_memory()
+
+    if community_enabled:
+        from ownscribe.transcription.community_diarizer import CommunityDiarizer
+
+        diarizer = CommunityDiarizer(config.diarization, progress=progress)
+        try:
+            result = diarizer.diarize(audio_path, result)
+        finally:
+            diarizer.close()
+    return result
 
 
 def _check_audio_silence(audio_path: Path) -> None:
@@ -101,9 +152,10 @@ def _create_transcriber(config: Config, progress=None):
     """
     asr_backend = getattr(config.transcription, "asr_backend", "whisperx")
 
+    native_diarization = config.diarization.enabled and not _uses_community_diarization(config)
     common = {
         "progress": progress,
-        "diarization_enabled": config.diarization.enabled,
+        "diarization_enabled": native_diarization,
         "models_dir": config.transcription.models_dir,
         "speaker_threshold": config.diarization.speaker_threshold,
         "chunk_seconds": config.transcription.chunk_seconds,
@@ -130,7 +182,7 @@ def _create_transcriber(config: Config, progress=None):
         funasr_config = FunASRConfig(
             model=getattr(config.transcription, "funasr_model", "sensevoice"),
             language=config.transcription.language,
-            spk_enabled=config.diarization.enabled,
+            spk_enabled=native_diarization,
             models_dir=config.transcription.models_dir,
             speaker_threshold=config.diarization.speaker_threshold,
             chunk_seconds=config.transcription.chunk_seconds,
@@ -145,7 +197,7 @@ def _create_transcriber(config: Config, progress=None):
     # Default: WhisperX
     from ownscribe.transcription.whisperx_transcriber import WhisperXTranscriber
 
-    diar_config = config.diarization if config.diarization.enabled else None
+    diar_config = config.diarization if native_diarization else None
     return WhisperXTranscriber(config.transcription, diar_config, progress=progress)
 
 
@@ -318,8 +370,8 @@ def run_transcribe(config: Config, audio_file: str) -> None:
 
 def run_warmup(config: Config) -> None:
     """Prefetch transcription/diarization models without processing audio."""
-    diar_enabled = config.diarization.enabled and bool(config.diarization.hf_token)
-    hf_token_warning = config.diarization.enabled and not config.diarization.hf_token
+    diar_enabled = config.diarization.enabled
+    community_enabled = _uses_community_diarization(config)
     local_sum = config.summarization.enabled and config.summarization.backend == "local"
 
     with PipelineProgress(
@@ -339,6 +391,16 @@ def run_warmup(config: Config) -> None:
             raise SystemExit(1) from None
 
         transcriber.prepare_models(language=config.transcription.language or None)
+        _release_model_owner(transcriber)
+        transcriber = None
+        _collect_model_memory()
+
+        if community_enabled:
+            from ownscribe.transcription.community_diarizer import CommunityDiarizer
+
+            diarizer = CommunityDiarizer(config.diarization, progress=progress)
+            diarizer.prepare_models()
+            diarizer.close()
 
         if local_sum:
             progress.begin("downloading_model")
@@ -358,12 +420,6 @@ def run_warmup(config: Config) -> None:
 
     if diar_enabled:
         click.echo("Diarization pipeline ready.")
-    elif hf_token_warning:
-        click.echo(
-            "Warning: Diarization enabled but no HF token configured. Skipping diarization warmup.",
-            err=True,
-        )
-
     if local_sum:
         click.echo(f"Summarization model ready: {config.summarization.model}")
 
@@ -453,7 +509,7 @@ def _do_transcribe_and_summarize(
     summarize: bool = True,
 ) -> None:
     """Shared logic for transcribe + optional summarize."""
-    diar_enabled = config.diarization.enabled and bool(config.diarization.hf_token)
+    diar_enabled = config.diarization.enabled
     sum_enabled = summarize and config.summarization.enabled
 
     summary = None
@@ -470,15 +526,13 @@ def _do_transcribe_and_summarize(
         download_summarizer=local_sum,
     ) as progress:
         try:
-            transcriber = _create_transcriber(config, progress=progress)
+            result = _transcribe_audio(config, audio_path, progress=progress)
         except ImportError:
             click.echo(
                 "Error: WhisperX is not installed. Install with:\n  uv pip install 'ownscribe[transcription]'",
                 err=True,
             )
             raise SystemExit(1) from None
-
-        result = transcriber.transcribe(audio_path)
 
         # Save transcript — silent, no echo
         transcript_str, _ = _format_output(config, result)

@@ -37,9 +37,9 @@ class TestDefaults:
         cfg = Config()
         assert cfg.diarization.telemetry is False
 
-    def test_default_diarization_device_auto(self):
+    def test_default_diarization_device_cpu(self):
         cfg = Config()
-        assert cfg.diarization.device == "auto"
+        assert cfg.diarization.device == "cpu"
 
     def test_default_summarization_template_empty(self):
         cfg = Config()

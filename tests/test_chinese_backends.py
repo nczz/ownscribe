@@ -76,6 +76,15 @@ def test_unknown_backend_fails_fast() -> None:
         _create_transcriber(config)
 
 
+def test_explicit_community_backend_requires_token_before_model_creation() -> None:
+    config = Config()
+    config.diarization.enabled = True
+    config.diarization.backend = "community"
+
+    with pytest.raises(ValueError, match="requires HF_TOKEN"):
+        _create_transcriber(config)
+
+
 def test_factory_propagates_diarization_contract() -> None:
     config = Config()
     config.transcription.asr_backend = "breeze"
@@ -88,6 +97,30 @@ def test_factory_propagates_diarization_contract() -> None:
     assert transcriber._diarization_enabled is False
     assert transcriber._models_dir == "/models"
     assert transcriber._speaker_threshold == 0.75
+
+
+def test_factory_disables_native_diarization_when_community_is_available() -> None:
+    config = Config()
+    config.transcription.asr_backend = "breeze"
+    config.diarization.enabled = True
+    config.diarization.backend = "auto"
+    config.diarization.hf_token = "hf_test"
+
+    transcriber = _create_transcriber(config)
+
+    assert transcriber._diarization_enabled is False
+
+
+def test_factory_keeps_native_diarization_when_explicit() -> None:
+    config = Config()
+    config.transcription.asr_backend = "breeze"
+    config.diarization.enabled = True
+    config.diarization.backend = "native"
+    config.diarization.hf_token = "hf_test"
+
+    transcriber = _create_transcriber(config)
+
+    assert transcriber._diarization_enabled is True
 
 
 def test_breeze_skips_diarization_when_disabled(tmp_path: Path) -> None:
@@ -180,14 +213,14 @@ def test_post_transcribe_does_not_mutate_diarization_setting(tmp_path: Path) -> 
     audio = tmp_path / "audio.wav"
     audio.write_bytes(b"wav")
     result = TranscriptResult(segments=[Segment(text="hello", start=0, end=1, words=[])], language="en", duration=1)
-    transcriber = MagicMock()
-    transcriber.transcribe.return_value = result
+    shared_pipeline = MagicMock(return_value=result)
 
     with (
-        patch("ownscribe.pipeline._create_transcriber", return_value=transcriber),
+        patch("ownscribe.pipeline._transcribe_audio", shared_pipeline),
         patch("ownscribe.pipeline._format_output", return_value=("transcript", None)),
     ):
         _post_transcribe(config, audio, tmp_path)
 
+    shared_pipeline.assert_called_once_with(config, audio)
     assert config.diarization.enabled is False
     assert (tmp_path / "transcript.md").read_text(encoding="utf-8") == "transcript"

@@ -2404,7 +2404,7 @@ requires-dist = [
     { name = "opencc-python-reimplemented", marker = "extra == 'firered'", specifier = ">=0.1.7,<1" },
     { name = "peft", marker = "extra == 'all'", specifier = ">=0.13,<1" },
     { name = "peft", marker = "extra == 'firered'", specifier = ">=0.13,<1" },
-    { name = "pyannote-audio", specifier = ">=4.0" },
+    { name = "pyannote-audio", specifier = ">=4.0,<5" },
     { name = "sentencepiece", marker = "extra == 'all'", specifier = ">=0.1.99,<1" },
     { name = "sentencepiece", marker = "extra == 'firered'", specifier = ">=0.1.99,<1" },
     { name = "sounddevice", specifier = ">=0.5" },

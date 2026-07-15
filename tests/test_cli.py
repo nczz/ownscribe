@@ -115,7 +115,7 @@ class TestSubcommandHelp:
         runner = CliRunner()
         result = runner.invoke(cli, ["warmup", "--help"])
         assert result.exit_code == 0
-        assert "Prefetch WhisperX/pyannote models" in result.output
+        assert "Prefetch configured transcription and diarization models" in result.output
 
     def test_cleanup_help(self):
         runner = CliRunner()

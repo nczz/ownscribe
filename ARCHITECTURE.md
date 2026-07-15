@@ -1,6 +1,6 @@
 # OwnScribe — 專案架構與開發狀態
 
-> 最後更新：2026-07-15
+> 最後更新：2026-07-16
 
 ## 專案概述
 
@@ -10,9 +10,9 @@ OwnScribe 是一個 **macOS 本地端會議記錄工具**，fork 自 [paberr/own
 
 ## 目前驗證狀態
 
-- 已提交基準：`906e5b0 Harden Chinese transcription backends`
-- 目前工作樹：四後端 bounded-memory 長音訊分塊處理已實作且驗證，待提交
-- 自動測試：263 passed
+- 已提交基準：`ea46609 Process long recordings in bounded chunks`
+- 目前工作樹：Community-1 bounded overlapping windows、全局 speaker reconciliation 與模型生命週期分離已實作，待提交
+- 自動測試：273 passed
 - 靜態檢查：Ruff 與 `git diff --check` 通過
 - 打包：sdist 與 wheel build 通過
 - 尚未完成的實證：固定台灣會議語料 benchmark、實體大型模型長時間 soak test
@@ -30,6 +30,7 @@ src/ownscribe/
 ├── transcription/                ← 【擴充】多後端 ASR
 │   ├── base.py                      Transcriber 抽象基類（介面：transcribe(path) → TranscriptResult）
 │   ├── models.py                    TranscriptResult / Segment / Word 資料模型
+│   ├── community_diarizer.py        Community-1 bounded windows + 全局 speaker reconciliation
 │   ├── whisperx_transcriber.py      原有：WhisperX + pyannote（英文佳）
 │   ├── funasr_transcriber.py        新增：FunASR SenseVoice + native optional CAM++
 │   ├── breeze_transcriber.py        新增：Breeze-ASR-25 + CAM++（台灣國語+中英混合，原生繁體）
@@ -70,10 +71,10 @@ swift/                            ← 【未動】Core Audio 錄音 helper（mac
 
 | 設定值 `asr_backend=` | 模型 | 執行裝置 | 繁體輸出 | 說話者辨識 | 適合場景 |
 |---|---|---|---|---|---|
-| `"breeze"` | Breeze-ASR-25 + optional CAM++ | MPS / CPU | ✅ 原生 | 可選 | 台灣中英混合會議 |
-| `"firered"` | FireRedASR2-AED + optional CAM++ | CPU | ❌ 需 OpenCC | 可選 | 外部研究整合 |
-| `"funasr"` | SenseVoice + optional CAM++ | CPU | ❌ 需 OpenCC | 原生整合 | 快速處理 |
-| `"whisperx"` ← 程式預設 | Whisper + optional pyannote | Metal / CPU | ❌ | 可選 | 英文場景 |
+| `"breeze"` | Breeze-ASR-25 | MPS / CPU | ✅ 原生 | Community-1／CAM++ | 台灣中英混合會議 |
+| `"firered"` | FireRedASR2-AED | CPU | ❌ 需 OpenCC | Community-1／CAM++ | 外部研究整合 |
+| `"funasr"` | SenseVoice | CPU | ❌ 需 OpenCC | Community-1／原生 CAM++ | 快速處理 |
+| `"whisperx"` ← 程式預設 | Whisper | Metal / CPU | ❌ | Community-1／原生 pyannote | 英文場景 |
 
 上游 CER 與速度不是在同一 benchmark 下產生，架構文件不將它們作為可直接比較的產品保證。
 
@@ -114,7 +115,16 @@ chunk_seconds = 60                    # bounded-memory 音訊視窗，最小 30 
 
 [diarization]
 enabled = true
+backend = "auto"                 # token available -> Community-1; otherwise native
+device = "cpu"
+min_speakers = 1
+max_speakers = 8
 speaker_threshold = 0.7
+window_seconds = 600
+window_overlap_seconds = 30
+community_speaker_threshold = 0.55
+segmentation_batch_size = 4
+embedding_batch_size = 8
 
 [summarization]
 enabled = false               # 待裝 Ollama 後啟用
@@ -136,7 +146,23 @@ keep_recording = true
 
 ## 長音訊記憶體模型
 
-`iter_audio_chunks()` 使用 `soundfile.SoundFile.read(frames)` 逐塊讀取、downmix 與必要的 resample。四個 ASR 後端的峰值 audio RAM 因此與 `chunk_seconds` 成正比，不再與整場會議長度成正比。Breeze/FireRed 會累積低維 speaker embeddings 後做跨 chunk centroid clustering；FunASR/WhisperX 的上游 diarization 是 chunk-local，因此 speaker label 會加入 chunk 前綴，避免錯誤合併不同人物。
+`iter_audio_chunks()` 使用 `soundfile.SoundFile.read(frames)` 逐塊讀取、downmix 與必要的 resample。四個 ASR 後端的峰值 audio RAM 因此與 `chunk_seconds` 成正比，不再與整場會議長度成正比。
+
+啟用 Community-1 時，ASR backend 先以關閉原生 diarization 的方式完成轉錄並釋放模型。`CommunityDiarizer` 再透過 `iter_audio_windows()` 逐一處理 600 秒 window（30 秒 overlap）：
+
+1. 每窗執行 Community-1 segmentation、WeSpeaker embedding、VBx clustering 與 exclusive diarization。
+2. 相鄰 window 先用重複音訊的 timeline overlap 建立一對一 speaker mapping。
+3. 未出現在 overlap 的人物用正規化 embedding 與全局 centroid 對接。
+4. 僅保留低維 centroids 和最終 timeline；waveform RAM 上限由 `window_seconds` 決定。
+5. 最終以 exclusive timeline 分別對齊 ASR words，並以 segment 最大重疊時間決定句子 speaker。
+
+若 `backend = "native"` 或 `auto` 找不到 HF token，Breeze/FireRed 繼續使用 CAM++ 全局 centroid；FunASR/WhisperX 保留 chunk-local speaker 前綴。
+
+### 2026-07-15 M5 Pro 實測
+
+- 41.54 秒雙人錄音：Community-1 從原生 CAM++ 的 5 個 labels 修正為合理的 2 個；batch 4/8 為 10.45 秒、峰值 RSS 約 2.56 GiB、無 swap。
+- 將同一錄音重複為 124.61 秒並強制切成三個 60 秒 window：全局結果仍為 2 speakers；25.66 秒、峰值 RSS 約 2.60 GiB、無 swap。
+- 上述重複錄音只驗證跨窗身份與 bounded-memory 契約，不視為獨立語料品質 benchmark；正式 DER/JER 仍需人工標註資料集。
 
 ---
 
@@ -199,6 +225,7 @@ ownscribe config
 ## 檔案改動清單（相對於上游 v0.13.0）
 
 **新增：**
+- `src/ownscribe/transcription/community_diarizer.py`
 - `src/ownscribe/transcription/funasr_transcriber.py`
 - `src/ownscribe/transcription/breeze_transcriber.py`
 - `src/ownscribe/transcription/firered_transcriber.py`
@@ -214,5 +241,6 @@ ownscribe config
 
 **主要測試覆蓋：**
 - `tests/test_chinese_backends.py` — backend factory、模型解析、bounded chunks、stereo、speaker clustering、atomic output
+- `tests/test_community_diarizer.py` — overlapping windows、跨窗 timeline/embedding reconciliation、word/segment 對齊
 - `tests/test_transcription.py` — WhisperX lifecycle、alignment、diarization API 相容性與 chunk integration
 - 其餘 `tests/` — CLI、pipeline、search、summarization、output、progress 與錄音行為

@@ -73,6 +73,37 @@ def iter_audio_chunks(
             converted.unlink(missing_ok=True)
 
 
+def iter_audio_windows(
+    path: Path,
+    target_rate: int,
+    window_seconds: int,
+    overlap_seconds: int,
+) -> Iterator[tuple[float, np.ndarray, bool]]:
+    """Yield bounded overlapping audio windows and mark the final window."""
+    if window_seconds < 30:
+        raise ValueError("audio window must be at least 30 seconds")
+    if overlap_seconds < 0 or overlap_seconds * 2 >= window_seconds:
+        raise ValueError("audio window overlap must be non-negative and less than half the window")
+
+    window_samples = window_seconds * target_rate
+    overlap_samples = overlap_seconds * target_rate
+    step_samples = window_samples - overlap_samples
+    buffer = np.empty(0, dtype=np.float32)
+    buffer_offset_samples = 0
+    total_samples = round(audio_duration(path) * target_rate)
+    for _, chunk in iter_audio_chunks(path, target_rate, 30):
+        buffer = np.concatenate((buffer, chunk))
+        while len(buffer) >= window_samples:
+            is_last = buffer_offset_samples + window_samples >= total_samples
+            yield buffer_offset_samples / target_rate, np.ascontiguousarray(buffer[:window_samples]), is_last
+            if is_last:
+                return
+            buffer = buffer[step_samples:]
+            buffer_offset_samples += step_samples
+    if len(buffer) > overlap_samples or buffer_offset_samples == 0:
+        yield buffer_offset_samples / target_rate, np.ascontiguousarray(buffer), True
+
+
 def cluster_speaker_embeddings(embeddings: list[np.ndarray | None], threshold: float) -> list[int | None]:
     """Cluster normalized embeddings using incrementally updated centroids."""
     if not 0.0 < threshold < 1.0:
