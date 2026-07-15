@@ -28,6 +28,7 @@ language = ""             # empty = auto-detect
 # funasr_model = "sensevoice"  # "sensevoice" (fastest, multilingual), "paraformer" (Chinese + timestamps)
 # models_dir = "~/.cache/ownscribe/models"
 # firered_repo = ""          # required for FireRed; path to a FireRedASR2S checkout
+# chunk_seconds = 60          # bounded-memory decode window; must be >= 30
 
 [diarization]
 enabled = false           # set to true + provide hf_token to enable
@@ -79,6 +80,7 @@ class TranscriptionConfig:
     funasr_model: str = "sensevoice"  # "sensevoice", "paraformer", "paraformer-en"
     models_dir: str = "~/.cache/ownscribe/models"  # unified model storage directory
     firered_repo: str = ""  # path to a compatible FireRedASR2S checkout
+    chunk_seconds: int = 60
 
 
 @dataclass
@@ -204,6 +206,7 @@ class FunASRConfig:
     traditional_chinese: bool = True  # Convert output to Traditional Chinese (Taiwan)
     models_dir: str = "~/.cache/ownscribe/models"
     speaker_threshold: float = 0.7
+    chunk_seconds: int = 60
 
 
 _MODEL_IDS = {
@@ -212,7 +215,7 @@ _MODEL_IDS = {
     "fsmn-vad": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
     "ct-punc": "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
     "campplus": "iic/speech_campplus_sv_zh-cn_16k-common",
-    "paraformer-zh-streaming": "paraformer-zh-streaming",
+    "paraformer-zh-streaming": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online",
     "firered-vad": "FireRedTeam/FireRedVAD",
     "firered-lid": "FireRedTeam/FireRedLID",
     "firered-asr2-aed": "FireRedTeam/FireRedASR2-AED",

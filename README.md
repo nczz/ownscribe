@@ -19,7 +19,7 @@
 | 繁體輸出 | 無 | ✅ 原生繁體 / OpenCC 轉換 |
 | 即時字幕 | 無 | ✅ `ownscribe live` |
 | 說話者辨識 | pyannote（需 HF token） | ✅ CAM++（免 token） |
-| 原有功能 | — | 100% 保留，向後相容 |
+| 原有功能 | — | 保留原 CLI 與 WhisperX 路徑，新增功能以設定切換 |
 
 ---
 
@@ -29,7 +29,7 @@
 - 🇹🇼 **台灣國語最佳化** — Breeze-ASR-25 專為台灣中文 + 中英混合訓練
 - 👥 **說話者辨識** — CAM++ 自動辨識誰在說話，不需要 HuggingFace token
 - 🔒 **完全地端** — 所有音訊、轉錄、模型都在本機，不上傳任何資料
-- ⚡ **Apple Silicon 加速** — MPS GPU 加速，M1 Pro 以上流暢運作
+- ⚡ **Apple Silicon 支援** — Breeze／WhisperX 可使用 MPS；FunASR 預設 CPU；FireRed 整合目前使用 CPU
 
 ---
 
@@ -73,7 +73,9 @@ uv sync --all-extras
 
 `--all-extras` 會安裝並鎖定中文 ASR、Ollama、OpenAI-compatible 與 FireRed 整合所需套件。只需中文後端可使用 `uv sync --extra chinese`。
 
-### 3. 下載模型
+### 2. 預先下載模型（可選）
+
+找不到本地模型時會使用 canonical model ID 下載；若希望在離線會議前先備妥模型，可執行：
 
 ```bash
 # 下載到專案 models/ 目錄
@@ -83,10 +85,10 @@ from huggingface_hub import snapshot_download
 # FunASR 基礎元件（VAD + 說話者辨識 + 標點 + 即時串流）
 for repo, name in [
     ('FunAudioLLM/SenseVoiceSmall', 'models/sensevoice'),
-    ('funasr/fsmn-vad', 'models/fsmn-vad'),
-    ('funasr/ct-punc', 'models/ct-punc'),
-    ('funasr/campplus', 'models/campplus'),
-    ('funasr/paraformer-zh-streaming', 'models/paraformer-zh-streaming'),
+    ('iic/speech_fsmn_vad_zh-cn-16k-common-pytorch', 'models/fsmn-vad'),
+    ('iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch', 'models/ct-punc'),
+    ('iic/speech_campplus_sv_zh-cn_16k-common', 'models/campplus'),
+    ('iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-online', 'models/paraformer-zh-streaming'),
 ]:
     print(f'Downloading {repo}...')
     snapshot_download(repo, local_dir=name)
@@ -98,7 +100,7 @@ print('Done!')
 "
 ```
 
-### 4. 設定
+### 3. 設定
 
 ```bash
 mkdir -p ~/.config/ownscribe
@@ -112,6 +114,7 @@ silence_timeout = 600
 [transcription]
 asr_backend = "breeze"
 language = ""
+chunk_seconds = 60        # 長錄音分塊處理；降低數值可進一步壓低峰值 RAM，最小 30
 
 [diarization]
 enabled = true
@@ -126,7 +129,7 @@ keep_recording = true
 EOF
 ```
 
-### 5. macOS 權限
+### 4. macOS 權限
 
 系統設定 → 隱私權與安全性 → 螢幕錄製 → 啟用你的終端 app（Terminal/iTerm2/VS Code），然後重啟終端。
 
@@ -143,7 +146,7 @@ ownscribe live
 一個指令同時做：
 1. ✅ 即時繁體字幕（paraformer-zh-streaming，~600ms 延遲）
 2. ✅ 系統音訊 + 麥克風錄音
-3. ✅ Ctrl+C 結束後 → Breeze-ASR-25 精修 + CAM++ 說話者辨識
+3. ✅ Ctrl+C 結束後 → 使用設定的 ASR backend 精修，並遵守 `diarization.enabled`
 4. ✅ 輸出 `~/ownscribe/YYYY-MM-DD_HHMM/transcript.md`
 
 ```
@@ -161,7 +164,7 @@ ownscribe live
   [0:00:09] 核心功能已完成約百分之八十
   ^C
 
-🔄 開始精確轉錄（breeze + 說話者辨識）...
+Starting accurate transcription (breeze, with speaker diarization)...
 ✅ 轉錄完成！
 📄 逐字稿: ~/ownscribe/2026-07-13_1400/transcript.md
    說話者: 3 人
@@ -241,12 +244,16 @@ firered_repo = "/absolute/path/to/FireRedASR2S"
 
 ## 說話者辨識
 
-使用 FunASR 的 **CAM++** 模型，完全不需要 HuggingFace token：
+說話者辨識依後端而異：Breeze／FireRed 使用 FSMN-VAD + CAM++，FunASR 使用上游原生 CAM++ pipeline，WhisperX 則使用 pyannote 且需要 HuggingFace token。CAM++ 路徑不需要 HuggingFace token：
 
 1. FSMN-VAD 切出語音區段
 2. CAM++ 對每段提取 speaker embedding（192 維向量）
 3. Cosine similarity 聚類（threshold 0.7）
 4. 時間戳對齊到 ASR 結果的每個句子
+
+## 長錄音與記憶體
+
+所有 ASR 後端都以 bounded chunks 解碼，不會再把完整錄音一次載入 RAM。預設每次最多處理 60 秒音訊，可在 `[transcription]` 以 `chunk_seconds` 調整，最小值為 30 秒。Breeze 與 FireRed 只跨 chunk 保留小型 speaker embeddings；FunASR 與 WhisperX 為避免把不同 chunk 的本地 speaker ID 誤認成同一人，輸出會加入 chunk 前綴。
 
 ---
 

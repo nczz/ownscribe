@@ -158,11 +158,7 @@ class TestDownloadProgressHooks:
         from ownscribe.config import TranscriptionConfig
         from ownscribe.transcription.whisperx_transcriber import WhisperXTranscriber
 
-        class _Audio:
-            shape = (16000,)
-
         fake_whisperx = types.SimpleNamespace(
-            load_audio=lambda _path: _Audio(),
             align=lambda *args, **kwargs: {"segments": []},
         )
 
@@ -176,6 +172,11 @@ class TestDownloadProgressHooks:
             mock.patch.object(transcriber, "_prepare_transcription_models") as mock_prepare_runtime,
             mock.patch.object(transcriber, "_load_align_model", return_value=(object(), object())),
             mock.patch.object(transcriber, "prepare_models") as mock_prepare_models,
+            mock.patch(
+                "ownscribe.transcription.whisperx_transcriber.iter_audio_chunks",
+                return_value=iter([(0.0, mock.MagicMock())]),
+            ),
+            mock.patch("ownscribe.transcription.whisperx_transcriber.audio_duration", return_value=1.0),
         ):
             result = transcriber._transcribe_inner(mock.MagicMock())
 

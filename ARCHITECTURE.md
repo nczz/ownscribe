@@ -1,12 +1,21 @@
 # OwnScribe — 專案架構與開發狀態
 
-> 最後更新：2026-07-13
+> 最後更新：2026-07-15
 
 ## 專案概述
 
 OwnScribe 是一個 **macOS 本地端會議記錄工具**，fork 自 [paberr/ownscribe](https://github.com/paberr/ownscribe) v0.13.0，新增了多個中文 ASR 後端和即時轉錄功能。
 
 **核心改動目標**：將 ASR 層從 WhisperX 擴展為可抽換的多後端架構，大幅提升中文辨識品質，同時保持原有設計不被破壞。
+
+## 目前驗證狀態
+
+- 已提交基準：`906e5b0 Harden Chinese transcription backends`
+- 目前工作樹：四後端 bounded-memory 長音訊分塊處理已實作且驗證，待提交
+- 自動測試：263 passed
+- 靜態檢查：Ruff 與 `git diff --check` 通過
+- 打包：sdist 與 wheel build 通過
+- 尚未完成的實證：固定台灣會議語料 benchmark、實體大型模型長時間 soak test
 
 ---
 
@@ -30,12 +39,12 @@ src/ownscribe/
 │   └── prompts.py
 ├── output/                       ← 【未動】輸出格式
 │   ├── markdown.py / json_output.py
-├── pipeline.py                   ← 【微調】_create_transcriber() 工廠函式支援 4 後端
+├── pipeline.py                   主流程與 4-backend factory
 ├── pipeline_live.py              ← 新增：即時會議 pipeline（串流字幕+錄音+會後精修）
 ├── cli.py                        ← 【微調】新增 `ownscribe live` 子指令
-├── config.py                     ← 【微調】新增 FunASRConfig、resolve_model_path()
-├── progress.py                   ← 【未動】TUI 進度
-└── search.py                     ← 【未動】會議搜尋
+├── config.py                     設定、backend 參數與 model resolver
+├── progress.py                   TUI 進度
+└── search.py                     會議搜尋
 
 scripts/
 └── live_preview.py               ← 獨立即時字幕腳本（已被 pipeline_live.py 取代）
@@ -101,6 +110,7 @@ funasr_model = "sensevoice"
 language = ""
 models_dir = "~/.cache/ownscribe/models"  # 本地模型搜尋目錄
 firered_repo = ""                    # FireRedASR2S checkout 的明確路徑
+chunk_seconds = 60                    # bounded-memory 音訊視窗，最小 30 秒
 
 [diarization]
 enabled = true
@@ -123,6 +133,10 @@ keep_recording = true
 1. 先找 `專案/models/名稱`（跟隨 symlinks）
 2. 再找設定的 models_dir
 3. fallback 為已註冊的 canonical ModelScope/HuggingFace ID（自動下載）
+
+## 長音訊記憶體模型
+
+`iter_audio_chunks()` 使用 `soundfile.SoundFile.read(frames)` 逐塊讀取、downmix 與必要的 resample。四個 ASR 後端的峰值 audio RAM 因此與 `chunk_seconds` 成正比，不再與整場會議長度成正比。Breeze/FireRed 會累積低維 speaker embeddings 後做跨 chunk centroid clustering；FunASR/WhisperX 的上游 diarization 是 chunk-local，因此 speaker label 會加入 chunk 前綴，避免錯誤合併不同人物。
 
 ---
 
@@ -198,5 +212,7 @@ ownscribe config
 - `src/ownscribe/config.py` — 新增 `FunASRConfig`、`resolve_model_path()`、`TranscriptionConfig.asr_backend/funasr_model/models_dir`
 - `src/ownscribe/pipeline.py` — `_create_transcriber()` 支援 4 後端
 
-**未動：**
-- `audio/`、`summarization/`、`output/`、`progress.py`、`search.py`、`swift/`、`tests/`
+**主要測試覆蓋：**
+- `tests/test_chinese_backends.py` — backend factory、模型解析、bounded chunks、stereo、speaker clustering、atomic output
+- `tests/test_transcription.py` — WhisperX lifecycle、alignment、diarization API 相容性與 chunk integration
+- 其餘 `tests/` — CLI、pipeline、search、summarization、output、progress 與錄音行為

@@ -106,6 +106,7 @@ def _create_transcriber(config: Config, progress=None):
         "diarization_enabled": config.diarization.enabled,
         "models_dir": config.transcription.models_dir,
         "speaker_threshold": config.diarization.speaker_threshold,
+        "chunk_seconds": config.transcription.chunk_seconds,
     }
 
     if asr_backend == "breeze":
@@ -132,6 +133,7 @@ def _create_transcriber(config: Config, progress=None):
             spk_enabled=config.diarization.enabled,
             models_dir=config.transcription.models_dir,
             speaker_threshold=config.diarization.speaker_threshold,
+            chunk_seconds=config.transcription.chunk_seconds,
         )
         return FunASRTranscriber(funasr_config, progress=progress)
 

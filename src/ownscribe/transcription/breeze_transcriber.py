@@ -12,7 +12,7 @@ from ownscribe.config import resolve_model_path
 from ownscribe.progress import NullProgress
 from ownscribe.transcription.base import Transcriber
 from ownscribe.transcription.models import Segment, TranscriptResult
-from ownscribe.transcription.utils import build_speaker_timeline, load_audio_mono, quiet_model_output
+from ownscribe.transcription.utils import audio_duration, build_speaker_timeline, iter_audio_chunks, quiet_model_output
 
 _SAMPLE_RATE = 16000
 
@@ -27,12 +27,14 @@ class BreezeTranscriber(Transcriber):
         diarization_enabled: bool = False,
         models_dir: str | None = None,
         speaker_threshold: float = 0.7,
+        chunk_seconds: int = 60,
     ) -> None:
         self._progress = progress or NullProgress()
         self._use_mps = use_mps
         self._diarization_enabled = diarization_enabled
         self._models_dir = models_dir
         self._speaker_threshold = speaker_threshold
+        self._chunk_seconds = chunk_seconds
         self._model = None
         self._processor = None
         self._device = None
@@ -78,26 +80,37 @@ class BreezeTranscriber(Transcriber):
 
     def transcribe(self, audio_path: Path) -> TranscriptResult:
         os.environ.setdefault("OMP_NUM_THREADS", "12")
-        audio, sample_rate = load_audio_mono(audio_path, _SAMPLE_RATE)
         progress = self._progress
 
         if self._model is None:
             self.prepare_models()
 
-        timeline = []
+        segments: list[Segment] = []
+        vad_segments: list[list[float]] = []
+        embeddings: list[np.ndarray | None] = []
         if self._diarization_enabled:
             progress.begin("diarizing")
             self._set_detail("diarizing", "Identifying speakers (CAM++)...")
-            timeline = self._run_diarization(audio, sample_rate)
-            progress.complete("diarizing")
 
         progress.begin("transcribing")
         device_label = str(self._device).upper()
         self._set_detail("transcribing", f"Transcribing (Breeze-ASR-25, {device_label})...")
-        segments = self._transcribe_chunked(audio, sample_rate)
+        for offset, audio in iter_audio_chunks(audio_path, _SAMPLE_RATE, self._chunk_seconds):
+            chunk_segments = self._transcribe_chunked(audio, _SAMPLE_RATE)
+            for segment in chunk_segments:
+                segment.start += offset
+                segment.end += offset
+            segments.extend(chunk_segments)
+            if self._diarization_enabled:
+                chunk_vad, chunk_embeddings = self._extract_speaker_embeddings(audio, _SAMPLE_RATE, offset)
+                vad_segments.extend(chunk_vad)
+                embeddings.extend(chunk_embeddings)
         progress.complete("transcribing")
+        timeline = build_speaker_timeline(vad_segments, embeddings, self._speaker_threshold)
+        if self._diarization_enabled:
+            progress.complete("diarizing")
         self._align_speakers(segments, timeline)
-        return TranscriptResult(segments=segments, language="zh-TW", duration=len(audio) / sample_rate)
+        return TranscriptResult(segments=segments, language="zh-TW", duration=audio_duration(audio_path))
 
     def _transcribe_chunked(self, audio: np.ndarray, sample_rate: int) -> list[Segment]:
         import torch
@@ -128,12 +141,15 @@ class BreezeTranscriber(Transcriber):
                     )
         return segments
 
-    def _run_diarization(self, audio: np.ndarray, sample_rate: int) -> list[dict]:
+    def _extract_speaker_embeddings(
+        self, audio: np.ndarray, sample_rate: int, offset_seconds: float
+    ) -> tuple[list[list[float]], list[np.ndarray | None]]:
         with quiet_model_output():
             result = self._vad_model.generate(input=audio)
-        vad_segments = result[0]["value"]
+        local_segments = result[0]["value"]
+        vad_segments = [[start + offset_seconds * 1000, end + offset_seconds * 1000] for start, end in local_segments]
         embeddings: list[np.ndarray | None] = []
-        for start_ms, end_ms in vad_segments:
+        for start_ms, end_ms in local_segments:
             chunk = audio[int(start_ms / 1000 * sample_rate) : int(end_ms / 1000 * sample_rate)]
             if len(chunk) < 1600:
                 embeddings.append(None)
@@ -141,7 +157,7 @@ class BreezeTranscriber(Transcriber):
             with quiet_model_output():
                 result = self._spk_model.generate(input=chunk, input_len=np.array([len(chunk)]))
             embeddings.append(np.asarray(result[0]["spk_embedding"]).reshape(-1))
-        return build_speaker_timeline(vad_segments, embeddings, self._speaker_threshold)
+        return vad_segments, embeddings
 
     def _align_speakers(self, segments: list[Segment], timeline: list[dict]) -> None:
         for segment in segments:

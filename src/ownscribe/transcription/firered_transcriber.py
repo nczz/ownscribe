@@ -13,7 +13,7 @@ from ownscribe.config import resolve_model_path
 from ownscribe.progress import NullProgress
 from ownscribe.transcription.base import Transcriber
 from ownscribe.transcription.models import Segment, TranscriptResult
-from ownscribe.transcription.utils import build_speaker_timeline, load_audio_mono, quiet_model_output
+from ownscribe.transcription.utils import audio_duration, build_speaker_timeline, iter_audio_chunks, quiet_model_output
 
 _SAMPLE_RATE = 16000
 
@@ -29,6 +29,7 @@ class FireRedTranscriber(Transcriber):
         models_dir: str | None = None,
         speaker_threshold: float = 0.7,
         firered_repo: str = "",
+        chunk_seconds: int = 60,
     ) -> None:
         self._progress = progress or NullProgress()
         # FireRedASR2S officially supports CPU/CUDA. MPS monkey-patching is intentionally unsupported.
@@ -37,6 +38,7 @@ class FireRedTranscriber(Transcriber):
         self._models_dir = models_dir
         self._speaker_threshold = speaker_threshold
         self._firered_repo = Path(firered_repo).expanduser() if firered_repo else None
+        self._chunk_seconds = chunk_seconds
         self._asr_system = None
         self._vad_model = None
         self._spk_model = None
@@ -132,31 +134,40 @@ class FireRedTranscriber(Transcriber):
         import soundfile as sf
 
         os.environ.setdefault("OMP_NUM_THREADS", "12")
-        audio, sample_rate = load_audio_mono(audio_path, _SAMPLE_RATE)
         if self._asr_system is None:
             self.prepare_models()
 
-        timeline = []
+        all_sentences: list[dict] = []
+        vad_segments: list[list[float]] = []
+        embeddings: list[np.ndarray | None] = []
         if self._diarization_enabled:
             self._progress.begin("diarizing")
-            timeline = self._run_diarization(audio, sample_rate)
+        self._progress.begin("transcribing")
+        for offset, audio in iter_audio_chunks(audio_path, _SAMPLE_RATE, self._chunk_seconds):
+            temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+                    temporary = Path(handle.name)
+                sf.write(str(temporary), audio, _SAMPLE_RATE, subtype="PCM_16")
+                with quiet_model_output():
+                    result = self._asr_system.process(str(temporary))
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            for sentence in result.get("sentences", []):
+                sentence = dict(sentence)
+                sentence["start_ms"] += offset * 1000
+                sentence["end_ms"] += offset * 1000
+                all_sentences.append(sentence)
+            if self._diarization_enabled:
+                chunk_vad, chunk_embeddings = self._extract_speaker_embeddings(audio, _SAMPLE_RATE, offset)
+                vad_segments.extend(chunk_vad)
+                embeddings.extend(chunk_embeddings)
+        self._progress.complete("transcribing")
+        timeline = build_speaker_timeline(vad_segments, embeddings, self._speaker_threshold)
+        if self._diarization_enabled:
             self._progress.complete("diarizing")
-
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
-                temporary = Path(handle.name)
-            sf.write(str(temporary), audio, sample_rate, subtype="PCM_16")
-            self._progress.begin("transcribing")
-            with quiet_model_output():
-                result = self._asr_system.process(str(temporary))
-            self._progress.complete("transcribing")
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-
-        sentences = result.get("sentences", [])
-        segments = self._align_speakers(sentences, timeline)
+        segments = self._align_speakers(all_sentences, timeline)
         try:
             from opencc import OpenCC
 
@@ -165,15 +176,18 @@ class FireRedTranscriber(Transcriber):
                 segment.text = converter.convert(segment.text)
         except ImportError:
             pass
-        language = sentences[0].get("lang", "zh") if sentences else "zh"
-        return TranscriptResult(segments=segments, language=language, duration=len(audio) / sample_rate)
+        language = all_sentences[0].get("lang", "zh") if all_sentences else "zh"
+        return TranscriptResult(segments=segments, language=language, duration=audio_duration(audio_path))
 
-    def _run_diarization(self, audio: np.ndarray, sample_rate: int) -> list[dict]:
+    def _extract_speaker_embeddings(
+        self, audio: np.ndarray, sample_rate: int, offset_seconds: float
+    ) -> tuple[list[list[float]], list[np.ndarray | None]]:
         with quiet_model_output():
             result = self._vad_model.generate(input=audio)
-        vad_segments = result[0]["value"]
+        local_segments = result[0]["value"]
+        vad_segments = [[start + offset_seconds * 1000, end + offset_seconds * 1000] for start, end in local_segments]
         embeddings: list[np.ndarray | None] = []
-        for start_ms, end_ms in vad_segments:
+        for start_ms, end_ms in local_segments:
             chunk = audio[int(start_ms / 1000 * sample_rate) : int(end_ms / 1000 * sample_rate)]
             if len(chunk) < 1600:
                 embeddings.append(None)
@@ -181,7 +195,7 @@ class FireRedTranscriber(Transcriber):
             with quiet_model_output():
                 result = self._spk_model.generate(input=chunk, input_len=np.array([len(chunk)]))
             embeddings.append(np.asarray(result[0]["spk_embedding"]).reshape(-1))
-        return build_speaker_timeline(vad_segments, embeddings, self._speaker_threshold)
+        return vad_segments, embeddings
 
     def _align_speakers(self, sentences: list[dict], timeline: list[dict]) -> list[Segment]:
         segments = []

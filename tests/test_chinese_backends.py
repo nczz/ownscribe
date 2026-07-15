@@ -19,27 +19,40 @@ from ownscribe.transcription.breeze_transcriber import BreezeTranscriber
 from ownscribe.transcription.firered_transcriber import FireRedTranscriber
 from ownscribe.transcription.funasr_transcriber import FunASRTranscriber
 from ownscribe.transcription.models import Segment, TranscriptResult
-from ownscribe.transcription.utils import cluster_speaker_embeddings, load_audio_mono, quiet_model_output
+from ownscribe.transcription.utils import (
+    cluster_speaker_embeddings,
+    iter_audio_chunks,
+    quiet_model_output,
+)
 
 
-def test_load_audio_mono_downmixes_stereo(tmp_path: Path) -> None:
+def test_iter_audio_chunks_downmixes_stereo(tmp_path: Path) -> None:
     path = tmp_path / "stereo.wav"
     left = np.ones(1600, dtype=np.float32)
     right = np.zeros(1600, dtype=np.float32)
     sf.write(path, np.column_stack([left, right]), 16000)
 
-    audio, sample_rate = load_audio_mono(path, 16000)
+    _, audio = next(iter_audio_chunks(path, 16000, 30))
 
     assert audio.shape == (1600,)
-    assert sample_rate == 16000
     assert np.mean(audio) == pytest.approx(0.5, abs=1e-3)
 
 
-def test_load_audio_rejects_empty_file(tmp_path: Path) -> None:
+def test_iter_audio_chunks_rejects_empty_file(tmp_path: Path) -> None:
     path = tmp_path / "empty.wav"
     sf.write(path, np.array([], dtype=np.float32), 16000)
     with pytest.raises(ValueError, match="empty"):
-        load_audio_mono(path)
+        list(iter_audio_chunks(path))
+
+
+def test_iter_audio_chunks_bounds_memory_and_preserves_offsets(tmp_path: Path) -> None:
+    path = tmp_path / "long.wav"
+    sf.write(path, np.zeros(65 * 16000, dtype=np.float32), 16000)
+
+    chunks = list(iter_audio_chunks(path, 16000, chunk_seconds=30))
+
+    assert [offset for offset, _ in chunks] == [0.0, 30.0, 60.0]
+    assert [len(audio) for _, audio in chunks] == [30 * 16000, 30 * 16000, 5 * 16000]
 
 
 def test_centroid_clustering_handles_invalid_and_updates_centroid() -> None:
@@ -84,12 +97,12 @@ def test_breeze_skips_diarization_when_disabled(tmp_path: Path) -> None:
     transcriber._model = object()
     transcriber._device = "cpu"
     transcriber._transcribe_chunked = MagicMock(return_value=[])
-    transcriber._run_diarization = MagicMock(side_effect=AssertionError("must not run"))
+    transcriber._extract_speaker_embeddings = MagicMock(side_effect=AssertionError("must not run"))
 
     result = transcriber.transcribe(path)
 
     assert result.duration == pytest.approx(0.25)
-    transcriber._run_diarization.assert_not_called()
+    transcriber._extract_speaker_embeddings.assert_not_called()
 
 
 def test_funasr_uses_native_speaker_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:

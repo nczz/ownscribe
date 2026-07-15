@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,7 +13,7 @@ from ownscribe.config import resolve_model_path
 from ownscribe.progress import NullProgress
 from ownscribe.transcription.base import Transcriber
 from ownscribe.transcription.models import Segment, TranscriptResult
-from ownscribe.transcription.utils import quiet_model_output
+from ownscribe.transcription.utils import audio_duration, iter_audio_chunks, quiet_model_output
 
 if TYPE_CHECKING:
     from ownscribe.config import FunASRConfig
@@ -90,26 +91,49 @@ class FunASRTranscriber(Transcriber):
         if self._model is None:
             self.prepare_models()
 
-        kwargs = {
-            "input": str(audio_path),
-            "batch_size_s": self._config.batch_size_s,
-            "use_itn": True,
-            "merge_vad": True,
-            "merge_length_s": 15,
-        }
-        if "sensevoice" in self._resolve_model_name().lower():
-            kwargs["language"] = self._config.language or "auto"
-
         self._progress.begin("transcribing")
         self._set_detail("transcribing", "Transcribing audio...")
+        segments: list[Segment] = []
+        language = self._config.language or "zh"
         try:
-            with quiet_model_output():
-                result = self._model.generate(**kwargs)
+            import soundfile as sf
+
+            for chunk_index, (offset, audio) in enumerate(
+                iter_audio_chunks(audio_path, 16000, self._config.chunk_seconds)
+            ):
+                temporary: Path | None = None
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+                        temporary = Path(handle.name)
+                    sf.write(str(temporary), audio, 16000, subtype="PCM_16")
+                    kwargs = {
+                        "input": str(temporary),
+                        "batch_size_s": self._config.batch_size_s,
+                        "use_itn": True,
+                        "merge_vad": True,
+                        "merge_length_s": 15,
+                    }
+                    if "sensevoice" in self._resolve_model_name().lower():
+                        kwargs["language"] = self._config.language or "auto"
+                    with quiet_model_output():
+                        result = self._model.generate(**kwargs)
+                    converted = self._convert_result(
+                        result,
+                        temporary,
+                        duration=len(audio) / 16000,
+                        offset=offset,
+                        speaker_prefix=f"{chunk_index}_" if self._config.spk_enabled else "",
+                    )
+                    segments.extend(converted.segments)
+                    language = converted.language or language
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
             self._progress.complete("transcribing")
         except Exception:
             self._progress.fail("transcribing")
             raise
-        return self._convert_result(result, audio_path)
+        return TranscriptResult(segments=segments, language=language, duration=audio_duration(audio_path))
 
     def _to_traditional(self, text: str) -> str:
         if not self._config.traditional_chinese or not text:
@@ -124,11 +148,19 @@ class FunASRTranscriber(Transcriber):
             logger.warning("opencc is not installed; preserving original Chinese output")
             return text
 
-    def _convert_result(self, result_list: list, audio_path: Path) -> TranscriptResult:
+    def _convert_result(
+        self,
+        result_list: list,
+        audio_path: Path,
+        *,
+        duration: float | None = None,
+        offset: float = 0.0,
+        speaker_prefix: str = "",
+    ) -> TranscriptResult:
         import soundfile as sf
         from funasr.utils.postprocess_utils import rich_transcription_postprocess
 
-        duration = sf.info(str(audio_path)).duration
+        duration = duration if duration is not None else sf.info(str(audio_path)).duration
         if not result_list or not result_list[0]:
             return TranscriptResult(segments=[], language="", duration=duration)
         result = result_list[0]
@@ -141,9 +173,9 @@ class FunASRTranscriber(Transcriber):
                 segments.append(
                     Segment(
                         text=text,
-                        start=(sentence.get("start") or 0) / 1000,
-                        end=(sentence.get("end") or 0) / 1000,
-                        speaker=f"SPEAKER_{speaker_id}" if speaker_id is not None else None,
+                        start=(sentence.get("start") or 0) / 1000 + offset,
+                        end=(sentence.get("end") or 0) / 1000 + offset,
+                        speaker=f"SPEAKER_{speaker_prefix}{speaker_id}" if speaker_id is not None else None,
                         words=[],
                     )
                 )
@@ -152,8 +184,11 @@ class FunASRTranscriber(Transcriber):
             timestamps = result.get("timestamp", [])
             if timestamps:
                 segments = self._regroup_by_punctuation(text, timestamps)
+                for segment in segments:
+                    segment.start += offset
+                    segment.end += offset
             elif text:
-                segments = [Segment(text=text.strip(), start=0, end=duration, words=[])]
+                segments = [Segment(text=text.strip(), start=offset, end=offset + duration, words=[])]
         language = self._config.language or result.get("language", "zh")
         return TranscriptResult(segments=segments, language=language, duration=duration)
 

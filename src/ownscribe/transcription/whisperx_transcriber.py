@@ -21,6 +21,7 @@ from ownscribe.progress import (
 )
 from ownscribe.transcription.base import Transcriber
 from ownscribe.transcription.models import Segment, TranscriptResult, Word
+from ownscribe.transcription.utils import audio_duration, iter_audio_chunks
 
 _SAMPLE_RATE = 16000
 
@@ -84,9 +85,7 @@ class WhisperXTranscriber(Transcriber):
             self._set_detail(step_key, f"{stage_label}: {int(event.percent)}%")
 
     def _capture_download_output(self, step_key: str, stage_label: str, fn, *args, **kwargs):
-        writer = DownloadProgressWriter(
-            lambda event: self._on_download_progress(step_key, stage_label, event)
-        )
+        writer = DownloadProgressWriter(lambda event: self._on_download_progress(step_key, stage_label, event))
         self._set_detail(step_key, stage_label)
         with contextlib.ExitStack() as stack:
             stack.enter_context(contextlib.redirect_stdout(writer))
@@ -167,11 +166,7 @@ class WhisperXTranscriber(Transcriber):
                 show_deferred_align_note=True,
             )
 
-            if (
-                self._diar_config
-                and self._diar_config.enabled
-                and self._diar_config.hf_token
-            ):
+            if self._diar_config and self._diar_config.enabled and self._diar_config.hf_token:
                 self._load_diarization_pipeline()
 
             progress.complete("preparing_models")
@@ -194,11 +189,7 @@ class WhisperXTranscriber(Transcriber):
         self._configure_runtime_env()
 
         hf_token_warning: str | None = None
-        if (
-            self._diar_config
-            and self._diar_config.enabled
-            and not self._diar_config.hf_token
-        ):
+        if self._diar_config and self._diar_config.enabled and not self._diar_config.hf_token:
             hf_token_warning = (
                 "Diarization requested but no HF token configured. "
                 "Set HF_TOKEN env var or hf_token in config. Skipping."
@@ -235,47 +226,57 @@ class WhisperXTranscriber(Transcriber):
                 )
                 self._set_detail("transcribing", None)
 
-                audio = whisperx.load_audio(str(audio_path))
-
                 tx_writer = ProgressWriter(
                     lambda frac: progress.update("transcribing", frac),
-                    offset=0.0, scale=0.5,
+                    offset=0.0,
+                    scale=0.5,
                 )
                 align_writer = ProgressWriter(
                     lambda frac: progress.update("transcribing", frac),
-                    offset=0.5, scale=0.5,
+                    offset=0.5,
+                    scale=0.5,
                 )
 
-                # Nested redirect overrides devnull → captures progress
-                with contextlib.redirect_stdout(tx_writer):
-                    result = self._model.transcribe(
-                        audio, batch_size=16, print_progress=True, combined_progress=True
-                    )
-
-                language = result.get("language", "")
-
-                align_model, align_metadata = self._load_align_model(language, step_key="transcribing")
-                with contextlib.redirect_stdout(align_writer):
-                    result = whisperx.align(
-                        result["segments"],
-                        align_model,
-                        align_metadata,
-                        audio,
-                        device="cpu",
-                        return_char_alignments=False,
-                        print_progress=True,
-                        combined_progress=True,
-                    )
+                all_segments = []
+                language = self._tx_config.language or ""
+                for chunk_index, (offset, audio) in enumerate(
+                    iter_audio_chunks(audio_path, _SAMPLE_RATE, self._tx_config.chunk_seconds)
+                ):
+                    with contextlib.redirect_stdout(tx_writer):
+                        result = self._model.transcribe(
+                            audio, batch_size=16, print_progress=True, combined_progress=True
+                        )
+                    language = result.get("language", language)
+                    align_model, align_metadata = self._load_align_model(language, step_key="transcribing")
+                    with contextlib.redirect_stdout(align_writer):
+                        result = whisperx.align(
+                            result["segments"],
+                            align_model,
+                            align_metadata,
+                            audio,
+                            device="cpu",
+                            return_char_alignments=False,
+                            print_progress=True,
+                            combined_progress=True,
+                        )
+                    if self._diar_config and self._diar_config.enabled and self._diar_config.hf_token:
+                        result = self._diarize(audio, result)
+                    prefix = f"{chunk_index}_"
+                    for segment in result.get("segments", []):
+                        segment["start"] = segment.get("start", 0.0) + offset
+                        segment["end"] = segment.get("end", 0.0) + offset
+                        if segment.get("speaker"):
+                            segment["speaker"] = f"SPEAKER_{prefix}{segment['speaker'].removeprefix('SPEAKER_')}"
+                        for word in segment.get("words", []):
+                            word["start"] = word.get("start", 0.0) + offset
+                            word["end"] = word.get("end", 0.0) + offset
+                            if word.get("speaker"):
+                                word["speaker"] = f"SPEAKER_{prefix}{word['speaker'].removeprefix('SPEAKER_')}"
+                        all_segments.append(segment)
+                result = {"segments": all_segments}
 
                 progress.complete("transcribing")
 
-                # --- Optional diarization ---
-                if (
-                    self._diar_config
-                    and self._diar_config.enabled
-                    and self._diar_config.hf_token
-                ):
-                    result = self._diarize(audio, result)
         finally:
             devnull.close()
 
@@ -303,7 +304,7 @@ class WhisperXTranscriber(Transcriber):
                 )
             )
 
-        duration = audio.shape[0] / float(_SAMPLE_RATE)
+        duration = audio_duration(audio_path)
         return TranscriptResult(segments=segments, language=language, duration=duration)
 
     @staticmethod
@@ -336,9 +337,7 @@ class WhisperXTranscriber(Transcriber):
             diarize_kwargs["max_speakers"] = self._diar_config.max_speakers
 
         # Call pyannote pipeline directly with progress hook
-        diarization = diarize_model.model(
-            audio_data, hook=progress.diarization_hook, **diarize_kwargs
-        )
+        diarization = diarize_model.model(audio_data, hook=progress.diarization_hook, **diarize_kwargs)
 
         progress.complete("diarizing")
 

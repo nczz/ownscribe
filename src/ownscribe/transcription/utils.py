@@ -5,31 +5,72 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
+import subprocess
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 
 
-def load_audio_mono(path: Path, target_rate: int | None = None) -> tuple[np.ndarray, int]:
-    """Load finite float32 mono audio and optionally resample it."""
+def audio_duration(path: Path) -> float:
+    """Return duration without decoding the audio payload."""
     import soundfile as sf
 
-    audio, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
-    if audio.size == 0:
-        raise ValueError(f"Audio file is empty: {path}")
-    audio = audio.mean(axis=1)
-    if not np.isfinite(audio).all():
-        raise ValueError(f"Audio contains non-finite samples: {path}")
+    return float(sf.info(str(path)).duration)
 
-    if target_rate is not None and sample_rate != target_rate:
-        import torch
-        import torchaudio
 
-        waveform = torch.from_numpy(audio).unsqueeze(0)
-        audio = torchaudio.functional.resample(waveform, sample_rate, target_rate).squeeze(0).cpu().numpy()
-        sample_rate = target_rate
-    return np.ascontiguousarray(audio, dtype=np.float32), sample_rate
+def iter_audio_chunks(
+    path: Path, target_rate: int = 16000, chunk_seconds: int = 60
+) -> Iterator[tuple[float, np.ndarray]]:
+    """Yield bounded mono chunks as ``(offset_seconds, samples)``."""
+    import soundfile as sf
+
+    if chunk_seconds < 30:
+        raise ValueError("transcription chunk_seconds must be at least 30")
+    converted: Path | None = None
+    try:
+        source = sf.SoundFile(str(path))
+    except sf.LibsndfileError:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as handle:
+            converted = Path(handle.name)
+        try:
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-y", "-i", str(path), "-ar", str(target_rate), "-ac", "1", str(converted)],
+                check=True,
+                capture_output=True,
+            )
+            source = sf.SoundFile(str(converted))
+        except Exception:
+            converted.unlink(missing_ok=True)
+            raise
+    try:
+        source_rate = source.samplerate
+        source_frames = chunk_seconds * source_rate
+        offset_frames = 0
+        yielded = False
+        while True:
+            block = source.read(source_frames, dtype="float32", always_2d=True)
+            if block.size == 0:
+                break
+            yielded = True
+            mono = np.ascontiguousarray(block.mean(axis=1), dtype=np.float32)
+            if not np.isfinite(mono).all():
+                raise ValueError(f"Audio contains non-finite samples: {path}")
+            if source_rate != target_rate:
+                import torch
+                import torchaudio
+
+                waveform = torch.from_numpy(mono).unsqueeze(0)
+                mono = torchaudio.functional.resample(waveform, source_rate, target_rate).squeeze(0).cpu().numpy()
+            yield offset_frames / source_rate, np.ascontiguousarray(mono, dtype=np.float32)
+            offset_frames += len(block)
+        if not yielded:
+            raise ValueError(f"Audio file is empty: {path}")
+    finally:
+        source.close()
+        if converted is not None:
+            converted.unlink(missing_ok=True)
 
 
 def cluster_speaker_embeddings(embeddings: list[np.ndarray | None], threshold: float) -> list[int | None]:
