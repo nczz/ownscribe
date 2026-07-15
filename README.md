@@ -14,7 +14,7 @@
 
 | | 原版 ownscribe | 本 Fork |
 |---|---|---|
-| ASR 引擎 | WhisperX（中文 CER ~20%） | **4 後端可選**（最低 CER 3%） |
+| ASR 引擎 | WhisperX | **4 後端可選** |
 | 中文優化 | 無 | ✅ 台灣國語 + 中英混合 + 方言 |
 | 繁體輸出 | 無 | ✅ 原生繁體 / OpenCC 轉換 |
 | 即時字幕 | 無 | ✅ `ownscribe live` |
@@ -35,12 +35,14 @@
 
 ## ASR 模型比較
 
-| 後端 | 模型 | 中文 CER | 速度 (M5 Pro) | 繁體 | 說話者辨識 | 最適合 |
-|------|------|---------|--------------|------|-----------|--------|
-| `breeze` ⭐ | MediaTek Breeze-ASR-25 + CAM++ | ~8% | 5.2x (MPS) | ✅ 原生 | ✅ | **台灣中英混合會議** |
-| `firered` | FireRedASR2-AED + CAM++ | **3.05%** | 2.3x (MPS) | OpenCC | ✅ | 最高中文準確度 |
-| `funasr` | FunASR SenseVoice + CAM++ | 7.81% | 17x (CPU) | OpenCC | ✅ | 快速處理、低資源 |
-| `whisperx` | WhisperX + pyannote | ~20% | 13x | ❌ | ✅ | 英文 / 原有行為 |
+| 後端 | 模型 | 執行裝置 | 繁體 | 說話者辨識 | 最適合 |
+|------|------|----------|------|-----------|--------|
+| `breeze` ⭐ | MediaTek Breeze-ASR-25 + CAM++ | MPS / CPU | ✅ 原生 | 可選 | **台灣中英混合會議** |
+| `firered` | FireRedASR2-AED + CAM++ | CPU | OpenCC | 可選 | 研究與品質比較 |
+| `funasr` | FunASR SenseVoice + CAM++ | CPU | OpenCC | 可選、原生整合 | 快速處理、低資源 |
+| `whisperx` | WhisperX + pyannote | Metal / CPU | ❌ | 可選 | 英文 / 原有行為 |
+
+> 各上游發布的 CER 與速度使用不同資料集、硬體及正規化方法，不能直接橫向排名。本專案尚未提供統一 benchmark，因此不宣稱某後端是絕對冠軍。
 
 ---
 
@@ -66,18 +68,10 @@ cd ownscribe
 brew install uv ffmpeg
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install -e ".[all]"
+uv sync --all-extras
 ```
 
-### 2. 安裝中文 ASR 依賴
-
-```bash
-# FunASR（即時串流 + SenseVoice + CAM++ 說話者辨識）
-uv pip install funasr modelscope opencc-python-reimplemented
-
-# Breeze-ASR-25（台灣中文 + 中英混合）— 需要 transformers
-uv pip install transformers
-```
+`--all-extras` 會安裝並鎖定中文 ASR、Ollama、OpenAI-compatible 與 FireRed 整合所需套件。只需中文後端可使用 `uv sync --extra chinese`。
 
 ### 3. 下載模型
 
@@ -193,7 +187,7 @@ ownscribe live --no-record
 ```toml
 [transcription]
 asr_backend = "firered"   # 要最高中文準確度時
-# asr_backend = "breeze"  # 台灣中英混合（預設）
+# asr_backend = "breeze"  # 台灣中英混合（本 fork 建議）
 # asr_backend = "funasr"  # 最快、低資源
 ```
 
@@ -207,7 +201,7 @@ ownscribe ask "上次討論的 deadline 是什麼時候？"
 
 ## 模型詳細說明
 
-### Breeze-ASR-25（預設）
+### Breeze-ASR-25（本 fork 建議）
 
 MediaTek Research 開發，專為台灣國語 + 中英混合優化。基於 Whisper-large-v2 微調。
 
@@ -217,22 +211,27 @@ MediaTek Research 開發，專為台灣國語 + 中英混合優化。基於 Whis
 - Apache 2.0 授權
 - [HuggingFace](https://huggingface.co/MediaTek-Research/Breeze-ASR-25) | [Paper](https://arxiv.org/abs/2506.11130)
 
-### FireRedASR2-AED（最精確）
+### FireRedASR2-AED（實驗性外部整合）
 
-小紅書 FireRed Team 開發，2026 年中文 ASR 公開基準冠軍。
+小紅書 FireRed Team 開發。FireRedASR2S 不是本套件的一部分，必須另外取得相容 checkout，且目前只啟用官方可支援的 CPU 路徑；不再以全域 `.cuda()` monkey-patch 模擬 MPS。
 
-- CER 3.05%（超越 Qwen3-ASR、FunASR、Doubao）
+```toml
+[transcription]
+asr_backend = "firered"
+firered_repo = "/absolute/path/to/FireRedASR2S"
+```
+
+- 上游提供多項公開 benchmark；請勿與不同資料集上的數字直接比較
 - 支援 20+ 中國方言
 - 內建 VAD + LID + 標點
-- 需要 monkey-patch 才能在 Apple MPS 上跑
 - Apache 2.0 授權
 - [HuggingFace](https://huggingface.co/FireRedTeam/FireRedASR2-AED) | [GitHub](https://github.com/FireRedTeam/FireRedASR2S)
 
 ### FunASR SenseVoice（最快）
 
-阿里巴巴通義實驗室開發，非自回歸架構，CPU 也能 17x realtime。
+阿里巴巴通義實驗室開發，採非自回歸架構；實際速度取決於音訊、硬體與 pipeline 設定。
 
-- CER 7.81%（比 Whisper 好一倍以上）
+- 上游提供 CER 與速度 benchmark；本專案不將跨資料集數字作為品質保證
 - CAM++ 說話者辨識內建
 - 支援情緒偵測、語言辨識
 - MIT 授權

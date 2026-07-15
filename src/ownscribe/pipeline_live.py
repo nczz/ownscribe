@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import queue
 import signal
-import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta
@@ -21,6 +21,36 @@ import click
 import numpy as np
 
 from ownscribe.config import Config
+from ownscribe.transcription.utils import quiet_model_output
+
+
+def _load_streaming_model(config: Config):
+    """Load the configured live model without mutating global logging or tqdm state."""
+    from funasr import AutoModel
+
+    from ownscribe.config import resolve_model_path
+
+    model = resolve_model_path("paraformer-zh-streaming", config.transcription.models_dir)
+    with quiet_model_output():
+        return AutoModel(model=str(model), disable_update=True)
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    """Atomically replace a UTF-8 text artifact in its destination directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def run_live_pipeline(
@@ -49,32 +79,7 @@ def run_live_pipeline(
     # --- Load streaming model ---
     click.echo("⏳ 載入即時辨識模型...")
 
-    import contextlib
-    import io
-    import logging as _logging
-
-    # Globally disable tqdm progress bars (FunASR uses tqdm internally)
-    import tqdm
-    _orig_tqdm_init = tqdm.tqdm.__init__
-
-    def _silent_tqdm_init(self, *args, **kwargs):
-        kwargs["disable"] = True
-        _orig_tqdm_init(self, *args, **kwargs)
-
-    tqdm.tqdm.__init__ = _silent_tqdm_init
-
-    _prev_level = _logging.root.level
-    _logging.root.setLevel(_logging.ERROR)
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        from funasr import AutoModel
-        from pathlib import Path as _Path
-        from ownscribe.config import resolve_model_path
-
-        # Prefer local cached model
-        _streaming_model_path = resolve_model_path("paraformer-zh-streaming")
-        _streaming_model_id = str(_streaming_model_path) if _streaming_model_path.exists() else "paraformer-zh-streaming"
-        streaming_model = AutoModel(model=_streaming_model_id, disable_update=True)
-    _logging.root.setLevel(_prev_level)
+    streaming_model = _load_streaming_model(config)
 
     click.echo("✅ 即時辨識模型就緒")
 
@@ -82,6 +87,7 @@ def run_live_pipeline(
     _cc = None
     try:
         from opencc import OpenCC
+
         _cc = OpenCC("s2twp")
     except ImportError:
         pass
@@ -156,7 +162,7 @@ def run_live_pipeline(
                     audio_chunk = buffer[:chunk_stride]
                     buffer = buffer[chunk_stride:]
 
-                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    with quiet_model_output():
                         res = streaming_model.generate(
                             input=audio_chunk,
                             cache=cache,
@@ -177,26 +183,29 @@ def run_live_pipeline(
 
     finally:
         signal.signal(signal.SIGINT, original_handler)
-
-        # Flush final chunk
-        if len(buffer) > 0:
-            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                res = streaming_model.generate(
-                    input=buffer,
-                    cache=cache,
-                    is_final=True,
-                    chunk_size=chunk_size,
-                    encoder_chunk_look_back=4,
-                    decoder_chunk_look_back=1,
-                )
-            if res and res[0] and res[0].get("text"):
-                text = res[0]["text"].strip()
-                if text:
-                    text = _to_trad(text)
-                    elapsed = time.time() - start_time
-                    ts = str(timedelta(seconds=int(elapsed)))
-                    click.echo(f"  [{ts}] {text}")
-                    line_count += 1
+        try:
+            # Flush final chunk.
+            if len(buffer) > 0:
+                with quiet_model_output():
+                    res = streaming_model.generate(
+                        input=buffer,
+                        cache=cache,
+                        is_final=True,
+                        chunk_size=chunk_size,
+                        encoder_chunk_look_back=4,
+                        decoder_chunk_look_back=1,
+                    )
+                if res and res[0] and res[0].get("text"):
+                    text = res[0]["text"].strip()
+                    if text:
+                        text = _to_trad(text)
+                        elapsed = time.time() - start_time
+                        ts = str(timedelta(seconds=int(elapsed)))
+                        click.echo(f"  [{ts}] {text}")
+                        line_count += 1
+        finally:
+            if recorder:
+                recorder.stop()
 
     # --- Stop recording ---
     duration = time.time() - start_time
@@ -206,14 +215,14 @@ def run_live_pipeline(
     click.echo(f"📝 即時辨識句數: {line_count}")
 
     if recorder:
-        recorder.stop()
         click.echo(f"💾 錄音已保存: {audio_path}")
         click.echo("=" * 60)
         click.echo()
 
         # --- Post-meeting: accurate transcription with speaker diarization ---
         if audio_path and audio_path.exists() and audio_path.stat().st_size > 44:
-            click.echo(f"🔄 開始精確轉錄（{config.transcription.asr_backend} + 說話者辨識）...")
+            mode = "with speaker diarization" if config.diarization.enabled else "without speaker diarization"
+            click.echo(f"Starting accurate transcription ({config.transcription.asr_backend}, {mode})...")
             click.echo()
             _post_transcribe(config, audio_path, out_dir)
         else:
@@ -237,15 +246,13 @@ def _create_live_recorder(config: Config):
             return recorder
 
     from ownscribe.audio.sounddevice_recorder import SoundDeviceRecorder
+
     return SoundDeviceRecorder(device=None, silence_timeout=0)
 
 
 def _post_transcribe(config: Config, audio_path: Path, out_dir: Path) -> None:
     """Run post-meeting accurate transcription using the configured backend."""
     from ownscribe.pipeline import _create_transcriber, _format_output
-
-    # Use whatever backend is configured (breeze/firered/funasr/whisperx)
-    config.diarization.enabled = True
 
     transcriber = _create_transcriber(config)
     result = transcriber.transcribe(audio_path)
@@ -254,9 +261,9 @@ def _post_transcribe(config: Config, audio_path: Path, out_dir: Path) -> None:
     transcript_str, _ = _format_output(config, result)
     ext = "json" if config.output.format == "json" else "md"
     transcript_path = out_dir / f"transcript.{ext}"
-    transcript_path.write_text(transcript_str)
+    _atomic_write(transcript_path, transcript_str)
 
-    click.echo(f"✅ 轉錄完成！")
+    click.echo("✅ 轉錄完成！")
     click.echo(f"📄 逐字稿: {transcript_path}")
 
     # Show stats
@@ -278,18 +285,20 @@ def _post_transcribe(config: Config, audio_path: Path, out_dir: Path) -> None:
     # Optional: run summarization
     if config.summarization.enabled:
         try:
-            from ownscribe.summarization import create_summarizer
             from ownscribe.output.markdown import format_summary
+            from ownscribe.summarization import create_summarizer
 
             summarizer = create_summarizer(config)
-            if summarizer.is_available():
-                click.echo()
-                click.echo("🤖 生成摘要中...")
-                summary = summarizer.summarize(result.full_text)
-                summary_path = out_dir / f"summary.{ext}"
-                summary_str = format_summary(summary) if ext == "md" else summary
-                summary_path.write_text(summary_str)
-                click.echo(f"📋 摘要: {summary_path}")
+            try:
+                if summarizer.is_available():
+                    click.echo()
+                    click.echo("🤖 生成摘要中...")
+                    summary = summarizer.summarize(result.full_text)
+                    summary_path = out_dir / f"summary.{ext}"
+                    summary_str = format_summary(summary) if ext == "md" else summary
+                    _atomic_write(summary_path, summary_str)
+                    click.echo(f"📋 摘要: {summary_path}")
+            finally:
                 summarizer.close()
         except Exception as exc:
             click.echo(f"⚠️  摘要失敗: {exc}", err=True)

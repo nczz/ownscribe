@@ -26,6 +26,8 @@ language = ""             # empty = auto-detect
 # hotwords = ""           # comma-separated words to boost recognition (softer hint than initial_prompt)
 # asr_backend = "whisperx"  # "whisperx" (default) or "funasr" (better Chinese, built-in diarization)
 # funasr_model = "sensevoice"  # "sensevoice" (fastest, multilingual), "paraformer" (Chinese + timestamps)
+# models_dir = "~/.cache/ownscribe/models"
+# firered_repo = ""          # required for FireRed; path to a FireRedASR2S checkout
 
 [diarization]
 enabled = false           # set to true + provide hf_token to enable
@@ -34,6 +36,7 @@ min_speakers = 0          # 0 = auto-detect
 max_speakers = 0
 telemetry = false         # set to true to allow HuggingFace Hub + pyannote metrics telemetry
 device = "auto"           # "auto" (mps if available), "mps", or "cpu"
+speaker_threshold = 0.7    # CAM++ cosine threshold for Breeze/FireRed
 
 [summarization]
 enabled = true
@@ -75,6 +78,7 @@ class TranscriptionConfig:
     asr_backend: str = "whisperx"  # "whisperx" (default) or "funasr" or "firered" or "breeze"
     funasr_model: str = "sensevoice"  # "sensevoice", "paraformer", "paraformer-en"
     models_dir: str = "~/.cache/ownscribe/models"  # unified model storage directory
+    firered_repo: str = ""  # path to a compatible FireRedASR2S checkout
 
 
 @dataclass
@@ -85,6 +89,7 @@ class DiarizationConfig:
     max_speakers: int = 0
     telemetry: bool = False
     device: str = "auto"
+    speaker_threshold: float = 0.7
 
 
 @dataclass
@@ -197,9 +202,25 @@ class FunASRConfig:
     batch_size_s: int = 300  # Seconds per batch (higher = more memory, faster)
     hotwords: str = ""  # Comma-separated hotwords (Paraformer SeACo only)
     traditional_chinese: bool = True  # Convert output to Traditional Chinese (Taiwan)
+    models_dir: str = "~/.cache/ownscribe/models"
+    speaker_threshold: float = 0.7
 
 
-def resolve_model_path(name: str, models_dir: str | None = None) -> Path:
+_MODEL_IDS = {
+    "breeze-asr-25": "MediaTek-Research/Breeze-ASR-25",
+    "sensevoice": "iic/SenseVoiceSmall",
+    "fsmn-vad": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+    "ct-punc": "iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+    "campplus": "iic/speech_campplus_sv_zh-cn_16k-common",
+    "paraformer-zh-streaming": "paraformer-zh-streaming",
+    "firered-vad": "FireRedTeam/FireRedVAD",
+    "firered-lid": "FireRedTeam/FireRedLID",
+    "firered-asr2-aed": "FireRedTeam/FireRedASR2-AED",
+    "firered-punc": "FireRedTeam/FireRedPunc",
+}
+
+
+def resolve_model_path(name: str, models_dir: str | None = None) -> Path | str:
     """Resolve a model name to its local path.
 
     Looks in the project's models/ directory first, then the configured models_dir,
@@ -227,8 +248,8 @@ def resolve_model_path(name: str, models_dir: str | None = None) -> Path:
     if p.exists():
         return p
 
-    # 4. Return name as-is (will be treated as a ModelScope/HuggingFace ID for auto-download)
-    return Path(name)
+    # 4. Return the canonical remote model ID.
+    return _MODEL_IDS.get(name, name)
 
 
 def ensure_config_file() -> Path:

@@ -96,20 +96,31 @@ def _create_transcriber(config: Config, progress=None):
     Supports four backends:
     - "whisperx" (default): WhisperX + optional pyannote diarization
     - "funasr": FunASR + CAM++ (better Chinese, built-in diarization)
-    - "firered": FireRedASR2-AED + CAM++ (best Chinese accuracy, ~2.3x realtime MPS)
+    - "firered": FireRedASR2-AED + optional CAM++ (external CPU integration)
     - "breeze": Breeze-ASR-25 + CAM++ (Taiwanese Mandarin + code-switching, native 繁體)
     """
     asr_backend = getattr(config.transcription, "asr_backend", "whisperx")
 
+    common = {
+        "progress": progress,
+        "diarization_enabled": config.diarization.enabled,
+        "models_dir": config.transcription.models_dir,
+        "speaker_threshold": config.diarization.speaker_threshold,
+    }
+
     if asr_backend == "breeze":
         from ownscribe.transcription.breeze_transcriber import BreezeTranscriber
 
-        return BreezeTranscriber(progress=progress, use_mps=True)
+        return BreezeTranscriber(use_mps=True, **common)
 
     if asr_backend == "firered":
         from ownscribe.transcription.firered_transcriber import FireRedTranscriber
 
-        return FireRedTranscriber(progress=progress, use_mps=True)
+        return FireRedTranscriber(
+            use_mps=False,
+            firered_repo=config.transcription.firered_repo,
+            **common,
+        )
 
     if asr_backend == "funasr":
         from ownscribe.config import FunASRConfig
@@ -119,8 +130,15 @@ def _create_transcriber(config: Config, progress=None):
             model=getattr(config.transcription, "funasr_model", "sensevoice"),
             language=config.transcription.language,
             spk_enabled=config.diarization.enabled,
+            models_dir=config.transcription.models_dir,
+            speaker_threshold=config.diarization.speaker_threshold,
         )
         return FunASRTranscriber(funasr_config, progress=progress)
+
+    if asr_backend != "whisperx":
+        raise ValueError(
+            f"Unknown transcription backend '{asr_backend}'. Expected one of: whisperx, funasr, firered, breeze"
+        )
 
     # Default: WhisperX
     from ownscribe.transcription.whisperx_transcriber import WhisperXTranscriber

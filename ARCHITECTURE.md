@@ -22,9 +22,9 @@ src/ownscribe/
 │   ├── base.py                      Transcriber 抽象基類（介面：transcribe(path) → TranscriptResult）
 │   ├── models.py                    TranscriptResult / Segment / Word 資料模型
 │   ├── whisperx_transcriber.py      原有：WhisperX + pyannote（英文佳）
-│   ├── funasr_transcriber.py        新增：FunASR SenseVoice + CAM++（中文 CER 7.81%）
+│   ├── funasr_transcriber.py        新增：FunASR SenseVoice + native optional CAM++
 │   ├── breeze_transcriber.py        新增：Breeze-ASR-25 + CAM++（台灣國語+中英混合，原生繁體）
-│   └── firered_transcriber.py       新增：FireRedASR2-AED + CAM++（中文 CER 3.05%，最精確）
+│   └── firered_transcriber.py       新增：FireRedASR2-AED + optional CAM++
 ├── summarization/                ← 【未動】LLM 摘要層
 │   ├── base.py / llama_cpp_summarizer.py / ollama_summarizer.py / openai_summarizer.py
 │   └── prompts.py
@@ -47,7 +47,7 @@ models/                           ← 模型目錄（gitignored）
 ├── ct-punc → ~/.cache/funasr/...    標點還原
 ├── campplus → ~/.cache/funasr/...   CAM++ 說話者辨識
 ├── paraformer-zh-streaming → ...    即時串流模型
-├── firered-asr2-aed → ~/Projects/FireRedASR2S/...
+├── firered-asr2-aed                 FireRed model cache or project-local model
 ├── firered-vad → ...
 ├── firered-lid → ...
 └── firered-punc → ...
@@ -59,12 +59,14 @@ swift/                            ← 【未動】Core Audio 錄音 helper（mac
 
 ## ASR 後端比較
 
-| 設定值 `asr_backend=` | 模型 | 中文 CER | 速度 (M5 Pro) | 繁體輸出 | 說話者辨識 | 適合場景 |
-|---|---|---|---|---|---|---|
-| `"breeze"` ← **目前預設** | Breeze-ASR-25 + CAM++ | ~8% (台灣國語) | 5.2x MPS | ✅ 原生 | ✅ CAM++ | 台灣中英混合會議 |
-| `"firered"` | FireRedASR2-AED + CAM++ | 3.05% | 2.3x MPS | ❌ 需 OpenCC | ✅ CAM++ | 最高中文準確度 |
-| `"funasr"` | SenseVoice + CAM++ | 7.81% | 17x CPU | ❌ 需 OpenCC | ✅ 內建 | 快速處理 |
-| `"whisperx"` | Whisper + pyannote | ~20% | 13x | ❌ | ✅ pyannote | 英文場景 |
+| 設定值 `asr_backend=` | 模型 | 執行裝置 | 繁體輸出 | 說話者辨識 | 適合場景 |
+|---|---|---|---|---|---|
+| `"breeze"` | Breeze-ASR-25 + optional CAM++ | MPS / CPU | ✅ 原生 | 可選 | 台灣中英混合會議 |
+| `"firered"` | FireRedASR2-AED + optional CAM++ | CPU | ❌ 需 OpenCC | 可選 | 外部研究整合 |
+| `"funasr"` | SenseVoice + optional CAM++ | CPU | ❌ 需 OpenCC | 原生整合 | 快速處理 |
+| `"whisperx"` ← 程式預設 | Whisper + optional pyannote | Metal / CPU | ❌ | 可選 | 英文場景 |
+
+上游 CER 與速度不是在同一 benchmark 下產生，架構文件不將它們作為可直接比較的產品保證。
 
 ---
 
@@ -76,7 +78,7 @@ swift/                            ← 【未動】Core Audio 錄音 helper（mac
      → 終端即時顯示繁體字幕（OpenCC s2twp 轉換）
 
 Ctrl+C → 停止錄音
-       → 會後精修：用設定的 asr_backend（預設 breeze）+ CAM++ 說話者辨識
+       → 會後精修：使用設定的 asr_backend，並遵守 diarization.enabled
        → 輸出 ~/ownscribe/YYYY-MM-DD_HHMM/transcript.md
 ```
 
@@ -97,10 +99,12 @@ silence_timeout = 600
 asr_backend = "breeze"        # breeze / firered / funasr / whisperx
 funasr_model = "sensevoice"
 language = ""
-models_dir = "~/.cache/ownscribe/models"  # 不再使用，路徑統一由 resolve_model_path 解析
+models_dir = "~/.cache/ownscribe/models"  # 本地模型搜尋目錄
+firered_repo = ""                    # FireRedASR2S checkout 的明確路徑
 
 [diarization]
 enabled = true
+speaker_threshold = 0.7
 
 [summarization]
 enabled = false               # 待裝 Ollama 後啟用
@@ -118,7 +122,7 @@ keep_recording = true
 統一透過 `config.py` 的 `resolve_model_path("名稱")` 解析：
 1. 先找 `專案/models/名稱`（跟隨 symlinks）
 2. 再找設定的 models_dir
-3. fallback 為 ModelScope/HuggingFace ID（自動下載）
+3. fallback 為已註冊的 canonical ModelScope/HuggingFace ID（自動下載）
 
 ---
 
@@ -129,7 +133,7 @@ keep_recording = true
 | `yap` | Apple SpeechAnalyzer CLI（即時字幕替代方案） | `brew install yap` |
 | `ffmpeg` | 音訊格式轉換 | `brew install ffmpeg` |
 | `uv` | Python 套件管理 | `brew install uv` |
-| FireRedASR2S | ASR 程式碼 | `~/Projects/FireRedASR2S/`（需在 PYTHONPATH） |
+| FireRedASR2S | ASR 程式碼 | 使用 `transcription.firered_repo` 明確設定；程式啟動時驗證 |
 
 ---
 
@@ -146,16 +150,14 @@ keep_recording = true
 
 ### 待做
 - [ ] 安裝 Ollama + qwen3:8b，啟用會後摘要（行動項/決議/總結）
-- [ ] `ownscribe live` 的即時串流還有 tqdm 進度條洩漏（需確認修復效果）
-- [ ] FireRedASR2 在 MPS 上 `torchaudio::forced_align` 未實作，時間戳精度降低
-- [ ] 考慮把 FireRedASR2S 的模型也直接移到專案 `models/` 下（目前用 symlink 指向外部）
+- [ ] 建立固定台灣會議語料與一致正規化方式的可重現 benchmark
 - [ ] 加入 CLI `--asr-backend` flag 讓命令列可臨時切換
-- [ ] 寫 unit test 覆蓋新增的 transcriber
+- [x] 新增中文 backend 的依賴、輸入、設定及錯誤路徑 contract tests
 
 ### 已知問題
-- SenseVoice + CAM++ 搭配時有 bug（`distribute_spk` TypeError），所以 funasr backend 的說話者辨識是 SenseVoice 內建的 sentence_info，不是獨立 CAM++
+- FunASR 需 1.3.12 以上，使用其已修正的 SenseVoice + CAM++ 原生 `sentence_info` 路徑
 - Breeze-ASR-25 沒有標點輸出，需要 LLM 後處理或接 FireRedPunc
-- FireRedASR2 的 `.cuda()` 硬編碼需要 monkey-patch 才能走 MPS
+- FireRed 僅使用官方 CPU/CUDA 契約；本專案不再修改全域 Torch `.cuda()` 行為
 
 ---
 
