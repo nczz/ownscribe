@@ -121,10 +121,19 @@ class BreezeTranscriber(Transcriber):
             chunk = audio[offset : offset + chunk_samples]
             if len(chunk) < 3200:
                 continue
-            features = self._processor(chunk, sampling_rate=sample_rate, return_tensors="pt").input_features
+            inputs = self._processor(
+                chunk,
+                sampling_rate=sample_rate,
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
             with torch.inference_mode():
                 predicted = self._model.generate(
-                    features.to(self._device), return_timestamps=True, language="zh", task="transcribe"
+                    inputs.input_features.to(self._device),
+                    attention_mask=inputs.attention_mask.to(self._device),
+                    return_timestamps=True,
+                    language="zh",
+                    task="transcribe",
                 )
             decoded = self._processor.batch_decode(predicted, skip_special_tokens=False, decode_with_timestamps=True)[0]
             offset_seconds = offset / sample_rate

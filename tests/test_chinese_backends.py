@@ -138,6 +138,34 @@ def test_breeze_skips_diarization_when_disabled(tmp_path: Path) -> None:
     transcriber._extract_speaker_embeddings.assert_not_called()
 
 
+def test_breeze_passes_attention_mask_to_generation() -> None:
+    transcriber = BreezeTranscriber(diarization_enabled=False)
+    features = MagicMock()
+    attention_mask = MagicMock()
+    transcriber._processor = MagicMock(
+        return_value=SimpleNamespace(input_features=features, attention_mask=attention_mask)
+    )
+    transcriber._processor.batch_decode.return_value = [""]
+    transcriber._model = MagicMock()
+    transcriber._device = "mps"
+
+    transcriber._transcribe_chunked(np.zeros(3200, dtype=np.float32), 16000)
+
+    transcriber._processor.assert_called_once_with(
+        pytest.approx(np.zeros(3200, dtype=np.float32)),
+        sampling_rate=16000,
+        return_tensors="pt",
+        return_attention_mask=True,
+    )
+    transcriber._model.generate.assert_called_once_with(
+        features.to.return_value,
+        attention_mask=attention_mask.to.return_value,
+        return_timestamps=True,
+        language="zh",
+        task="transcribe",
+    )
+
+
 def test_funasr_uses_native_speaker_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
 

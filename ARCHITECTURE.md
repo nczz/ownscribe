@@ -116,7 +116,7 @@ chunk_seconds = 60                    # bounded-memory 音訊視窗，最小 30 
 [diarization]
 enabled = true
 backend = "auto"                 # token available -> Community-1; otherwise native
-device = "cpu"
+device = "mps"
 min_speakers = 1
 max_speakers = 8
 speaker_threshold = 0.7
@@ -163,6 +163,14 @@ keep_recording = true
 - 41.54 秒雙人錄音：Community-1 從原生 CAM++ 的 5 個 labels 修正為合理的 2 個；batch 4/8 為 10.45 秒、峰值 RSS 約 2.56 GiB、無 swap。
 - 將同一錄音重複為 124.61 秒並強制切成三個 60 秒 window：全局結果仍為 2 speakers；25.66 秒、峰值 RSS 約 2.60 GiB、無 swap。
 - 上述重複錄音只驗證跨窗身份與 bounded-memory 契約，不視為獨立語料品質 benchmark；正式 DER/JER 仍需人工標註資料集。
+
+### 2026-07-16 CPU / MPS A/B
+
+- 同一份 41.54 秒錄音在 `PYTORCH_ENABLE_MPS_FALLBACK=0` 下完成 MPS 推論，證明 neural stages 沒有回退 CPU。
+- CPU 純推論為 8.38–8.52 秒；MPS 首次為 9.17 秒，Metal warm-up 後穩定為 2.40–2.41 秒。
+- CPU 與 MPS 均輸出 2 speakers、12 turns，所有 speaker labels 與 timestamps 完全一致。
+- 因此 Apple Silicon 預設改為 `device = "mps"`；`cpu` 保留為相容性 fallback。VBx clustering 等非 neural stages 仍在 CPU 執行。
+- 完整 Breeze MPS → 模型釋放 → Community-1 MPS 路徑為 15.46 秒，輸出 12 segments／2 speakers，峰值 RSS 約 9.10 GiB、無 swap；測試明確停用 MPS CPU fallback。
 
 ---
 

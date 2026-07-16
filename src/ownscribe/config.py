@@ -37,7 +37,7 @@ backend = "auto"          # Community-1 with token; native backend diarization o
 min_speakers = 0          # 0 = auto-detect
 max_speakers = 8          # global safety cap; set 0 for no upper bound
 telemetry = false         # set to true to allow HuggingFace Hub + pyannote metrics telemetry
-device = "cpu"            # Community-1 is most reliable on CPU; MPS is experimental
+device = "mps"            # Apple Silicon default; use "cpu" for compatibility fallback
 speaker_threshold = 0.7    # CAM++ cosine threshold for Breeze/FireRed
 window_seconds = 600       # bounded Community-1 window
 window_overlap_seconds = 30
@@ -97,7 +97,7 @@ class DiarizationConfig:
     min_speakers: int = 0
     max_speakers: int = 8
     telemetry: bool = False
-    device: str = "cpu"
+    device: str = "mps"
     speaker_threshold: float = 0.7
     window_seconds: int = 600
     window_overlap_seconds: int = 30
