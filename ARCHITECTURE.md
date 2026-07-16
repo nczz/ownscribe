@@ -10,9 +10,9 @@ OwnScribe 是一個 **macOS 本地端會議記錄工具**，fork 自 [paberr/own
 
 ## 目前驗證狀態
 
-- 已提交基準：`ea46609 Process long recordings in bounded chunks`
-- 目前工作樹：Community-1 bounded overlapping windows、全局 speaker reconciliation 與模型生命週期分離已實作，待提交
-- 自動測試：273 passed
+- 已提交版本：`fb358c9 Use MPS for speaker diarization by default`
+- 目前狀態：Community-1 bounded overlapping windows、全局 speaker reconciliation、共用 live pipeline 與 MPS 預設均已提交並推送
+- 自動測試：274 passed
 - 靜態檢查：Ruff 與 `git diff --check` 通過
 - 打包：sdist 與 wheel build 通過
 - 尚未完成的實證：固定台灣會議語料 benchmark、實體大型模型長時間 soak test
