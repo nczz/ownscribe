@@ -8,7 +8,12 @@ import numpy as np
 import soundfile as sf
 
 from ownscribe.config import DiarizationConfig
-from ownscribe.transcription.community_diarizer import CommunityDiarizer, SpeakerTurn, assign_speakers
+from ownscribe.transcription.community_diarizer import (
+    CommunityDiarizer,
+    SpeakerTurn,
+    _collect_valid_embeddings,
+    assign_speakers,
+)
 from ownscribe.transcription.models import Segment, TranscriptResult, Word
 from ownscribe.transcription.utils import iter_audio_windows
 
@@ -72,6 +77,51 @@ def test_embedding_fallback_matches_speaker_absent_from_overlap() -> None:
     )
 
     assert mapping == {"local": "SPEAKER_00"}
+
+
+def test_invalid_community_embedding_is_ignored() -> None:
+    embeddings = _collect_valid_embeddings(
+        ["valid", "invalid"],
+        [np.array([1.0, 0.0], dtype=np.float32), np.array([np.nan, 0.0], dtype=np.float32)],
+    )
+
+    assert set(embeddings) == {"valid"}
+    np.testing.assert_allclose(embeddings["valid"], np.array([1.0, 0.0], dtype=np.float32))
+
+
+def test_collect_embeddings_preserves_original_label_indexes() -> None:
+    embeddings = _collect_valid_embeddings(
+        ["unused", "used"],
+        [np.array([1.0, 0.0], dtype=np.float32), np.array([0.0, 1.0], dtype=np.float32)],
+        {"used"},
+    )
+
+    assert set(embeddings) == {"used"}
+    np.testing.assert_allclose(embeddings["used"], np.array([0.0, 1.0], dtype=np.float32))
+
+
+def test_missing_local_embedding_uses_timeline_only_stitching() -> None:
+    diarizer = CommunityDiarizer(DiarizationConfig(window_seconds=60, window_overlap_seconds=10))
+    centroids: list[np.ndarray | None] = []
+    counts: list[int] = []
+
+    first_mapping = diarizer._match_speakers([SpeakerTurn(0.0, 1.0, "A")], {}, [], centroids, counts, 0.0)
+    assert first_mapping == {"A": "SPEAKER_00"}
+    assert centroids == [None]
+    assert counts == [0]
+
+    second_mapping = diarizer._match_speakers(
+        [SpeakerTurn(0.0, 1.0, "B")],
+        {},
+        [SpeakerTurn(50.0, 51.0, "SPEAKER_00")],
+        centroids,
+        counts,
+        50.0,
+    )
+
+    assert second_mapping == {"B": "SPEAKER_00"}
+    assert centroids == [None]
+    assert counts == [0]
 
 
 def test_global_speaker_cap_prevents_cross_window_explosion() -> None:

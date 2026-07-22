@@ -69,7 +69,7 @@ class CommunityDiarizer:
         if self._progress is not None:
             self._progress.begin("diarizing")
 
-        centroids: list[np.ndarray] = []
+        centroids: list[np.ndarray | None] = []
         centroid_counts: list[int] = []
         turns: list[SpeakerTurn] = []
         try:
@@ -133,10 +133,9 @@ class CommunityDiarizer:
             output = self._pipeline({"waveform": waveform, "sample_rate": _SAMPLE_RATE}, **kwargs)
         annotation = output.exclusive_speaker_diarization
         turns = [SpeakerTurn(segment.start, segment.end, speaker) for segment, speaker in annotation]
+        turn_speakers = {turn.speaker for turn in turns}
         labels = output.speaker_diarization.labels()
-        embeddings = {
-            label: _normalize_embedding(output.speaker_embeddings[index]) for index, label in enumerate(labels)
-        }
+        embeddings = _collect_valid_embeddings(labels, output.speaker_embeddings, turn_speakers)
         return turns, embeddings
 
     def _match_speakers(
@@ -144,11 +143,11 @@ class CommunityDiarizer:
         local_turns: list[SpeakerTurn],
         local_embeddings: dict[str, np.ndarray],
         global_turns: list[SpeakerTurn],
-        centroids: list[np.ndarray],
+        centroids: list[np.ndarray | None],
         centroid_counts: list[int],
         offset: float,
     ) -> dict[str, str]:
-        local_labels = sorted(local_embeddings)
+        local_labels = sorted({turn.speaker for turn in local_turns} | set(local_embeddings))
         mapping: dict[str, str] = {}
         used_global: set[int] = set()
 
@@ -175,9 +174,11 @@ class CommunityDiarizer:
         for local_label in local_labels:
             if local_label in mapping:
                 continue
-            vector = local_embeddings[local_label]
+            vector = local_embeddings.get(local_label)
+            if vector is None:
+                continue
             for global_index, centroid in enumerate(centroids):
-                if global_index not in used_global:
+                if global_index not in used_global and centroid is not None:
                     similarities.append((float(np.dot(vector, centroid)), local_label, global_index))
         for similarity, local_label, global_index in sorted(similarities, reverse=True):
             if similarity < self._config.community_speaker_threshold:
@@ -188,21 +189,37 @@ class CommunityDiarizer:
 
         for local_label in local_labels:
             if local_label not in mapping:
+                local_embedding = local_embeddings.get(local_label)
                 available = [index for index in range(len(centroids)) if index not in used_global]
                 if self._config.max_speakers and len(centroids) >= self._config.max_speakers and available:
-                    global_index = max(
-                        available,
-                        key=lambda index: float(np.dot(local_embeddings[local_label], centroids[index])),
-                    )
+                    if local_embedding is None:
+                        global_index = available[0]
+                    else:
+                        global_index = max(
+                            available,
+                            key=lambda index: (
+                                float(np.dot(local_embedding, centroids[index]))
+                                if centroids[index] is not None
+                                else float("-inf")
+                            ),
+                        )
                     mapping[local_label] = _speaker_label(global_index)
                     used_global.add(global_index)
                 else:
                     mapping[local_label] = _speaker_label(len(centroids))
-                    centroids.append(local_embeddings[local_label])
+                    centroids.append(local_embedding)
                     centroid_counts.append(0)
+            local_embedding = local_embeddings.get(local_label)
+            if local_embedding is None:
+                continue
             global_index = int(mapping[local_label].removeprefix("SPEAKER_"))
             count = centroid_counts[global_index]
-            updated = centroids[global_index] * count + local_embeddings[local_label]
+            centroid = centroids[global_index]
+            if centroid is None:
+                centroids[global_index] = local_embedding
+                centroid_counts[global_index] = 1
+                continue
+            updated = centroid * count + local_embedding
             centroids[global_index] = _normalize_embedding(updated)
             centroid_counts[global_index] = count + 1
         return mapping
@@ -274,6 +291,25 @@ def _timeline_overlap(
                     min(local_end, global_turn.end, overlap_end) - max(local_start, global_turn.start, offset),
                 )
     return score
+
+
+def _collect_valid_embeddings(
+    labels: list[str],
+    speaker_embeddings,
+    allowed_labels: set[str] | None = None,
+) -> dict[str, np.ndarray]:
+    embeddings: dict[str, np.ndarray] = {}
+    for index, label in enumerate(labels):
+        if allowed_labels is not None and label not in allowed_labels:
+            continue
+        try:
+            embeddings[label] = _normalize_embedding(speaker_embeddings[index])
+        except (IndexError, TypeError, ValueError):
+            logger.warning(
+                "Community-1 returned no usable embedding for %s; speaker stitching will use overlap only",
+                label,
+            )
+    return embeddings
 
 
 def _normalize_embedding(embedding) -> np.ndarray:
