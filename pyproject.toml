@@ -66,9 +66,9 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/paberr/ownscribe"
-Repository = "https://github.com/paberr/ownscribe"
-Issues = "https://github.com/paberr/ownscribe/issues"
+Homepage = "https://github.com/nczz/ownscribe"
+Repository = "https://github.com/nczz/ownscribe"
+Issues = "https://github.com/nczz/ownscribe/issues"
 
 [project.scripts]
 ownscribe = "ownscribe.cli:cli"

@@ -6,6 +6,8 @@ import contextlib
 import json
 from unittest import mock
 
+import pytest
+
 from ownscribe.config import Config
 from ownscribe.transcription.models import Segment, TranscriptResult
 
@@ -86,6 +88,43 @@ class TestCreateRecorder:
         with mock.patch("ownscribe.audio.sounddevice_recorder.SoundDeviceRecorder") as mock_sd:
             _create_recorder(config)
             mock_sd.assert_called_once_with(device="USB Mic", silence_timeout=60)
+
+
+class TestRunPipelineCleanup:
+    def test_stops_recorder_when_status_polling_fails(self, tmp_path):
+        from ownscribe.pipeline import run_pipeline
+
+        class FailingRecorder:
+            stopped = False
+
+            def start(self, output_path):
+                pass
+
+            @property
+            def is_recording(self):
+                raise RuntimeError("recording status failed")
+
+            @property
+            def is_muted(self):
+                return False
+
+            def stop(self):
+                self.stopped = True
+
+        config = Config()
+        config.output.dir = str(tmp_path)
+        recorder = FailingRecorder()
+        fake_stdin = mock.Mock()
+        fake_stdin.isatty.return_value = False
+
+        with (
+            mock.patch("ownscribe.pipeline._create_recorder", return_value=recorder),
+            mock.patch("ownscribe.pipeline.sys.stdin", fake_stdin),
+            pytest.raises(RuntimeError, match="recording status failed"),
+        ):
+            run_pipeline(config)
+
+        assert recorder.stopped is True
 
 
 class TestFormatOutput:

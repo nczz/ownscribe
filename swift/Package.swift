@@ -10,6 +10,7 @@ let package = Package(
             path: "Sources",
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
+                .linkedFramework("Accelerate"),
                 .linkedFramework("AudioToolbox"),
             ]
         )

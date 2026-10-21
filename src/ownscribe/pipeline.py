@@ -333,8 +333,9 @@ def run_pipeline(config: Config) -> None:
         if old_termios is not None:
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_termios)
         signal.signal(signal.SIGINT, original_handler)
-
-    recorder.stop()
+        # The helper owns hardware resources and may otherwise outlive this process if
+        # rendering, terminal I/O, or status polling raises unexpectedly.
+        recorder.stop()
     if getattr(recorder, "silence_timed_out", False):
         click.echo("\n\nRecording auto-stopped after silence timeout.")
     else:

@@ -69,9 +69,11 @@ brew install uv ffmpeg
 uv venv --python 3.12
 source .venv/bin/activate
 uv sync --all-extras
+bash swift/build.sh
+test "$(bin/ownscribe-audio version)" = "2"
 ```
 
-`--all-extras` 會安裝並鎖定中文 ASR、Ollama、OpenAI-compatible 與 FireRed 整合所需套件。只需中文後端可使用 `uv sync --extra chinese`。
+`--all-extras` 會安裝並鎖定中文 ASR、Ollama、OpenAI-compatible 與 FireRed 整合所需套件。只需中文後端可使用 `uv sync --extra chinese`。Python wrapper 只接受相同 helper protocol 的 Swift binary，會拒絕舊版 cache，避免 Python 與錄音 helper 行為不一致。
 
 ### 2. Community-1 存取權（高品質 speaker diarization）
 
@@ -139,7 +141,9 @@ ownscribe warmup --with-diarization
 
 ### 5. macOS 權限
 
-系統設定 → 隱私權與安全性 → 螢幕錄製 → 啟用你的終端 app（Terminal/iTerm2/VS Code），然後重啟終端。
+系統設定 → 隱私權與安全性 → 螢幕與系統錄音 → 啟用你的終端 app（Terminal/iTerm2/VS Code），然後完整結束並重開終端。
+
+若錄音輸出 `SCStreamErrorDomain Code=-3815`，代表 ScreenCaptureKit 的顯示器／視窗來源在錄音期間消失，並非 ASR 錯誤。`capture_mode = "all"` 會以目前的主顯示器啟動，顯示器切換或短暫中斷後持續嘗試重新連線；`capture_mode = "picker"` 則重新顯示系統選擇器，不會擅自改錄其他來源。兩種模式都會以靜音補回中斷時間，維持系統音訊與麥克風時間軸同步。`[SILENCE_WARNING]` 表示該時段沒有可用的系統音訊；若啟用 `mic = true`，麥克風軌會繼續錄製。
 
 ---
 
@@ -156,6 +160,8 @@ ownscribe live
 2. ✅ 系統音訊 + 麥克風錄音
 3. ✅ Ctrl+C 結束後 → 使用設定的 ASR backend 精修，並遵守 `diarization.enabled`
 4. ✅ 輸出 `~/ownscribe/YYYY-MM-DD_HHMM/transcript.md`
+
+即時模型若短暫跟不上輸入，preview queue 會保留最新音訊並捨棄最舊字幕區塊，避免記憶體無限成長與字幕延遲持續累積；獨立的完整錄音不受影響，結束時會顯示略過數量。
 
 ```
 ⏳ 載入即時辨識模型...

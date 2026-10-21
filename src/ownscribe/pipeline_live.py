@@ -53,6 +53,31 @@ def _atomic_write(path: Path, content: str) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _put_latest_preview(audio_queue: queue.Queue[np.ndarray], chunk: np.ndarray) -> bool:
+    """Queue a preview chunk without allowing inference lag to grow unbounded.
+
+    Returns True when an old or new preview chunk had to be dropped.
+    """
+    try:
+        audio_queue.put_nowait(chunk)
+        return False
+    except queue.Full:
+        pass
+
+    dropped = False
+    try:
+        audio_queue.get_nowait()
+        dropped = True
+    except queue.Empty:
+        pass
+
+    try:
+        audio_queue.put_nowait(chunk)
+    except queue.Full:
+        return True
+    return dropped
+
+
 def run_live_pipeline(
     config: Config,
     *,
@@ -120,10 +145,17 @@ def run_live_pipeline(
     # --- Audio capture via sounddevice (for streaming preview) ---
     import sounddevice as sd
 
-    audio_queue: queue.Queue[np.ndarray] = queue.Queue()
+    # Live preview must not grow without bound when inference falls behind real time.
+    # Recording is handled independently, so dropping the oldest preview chunk keeps
+    # latency bounded without losing the authoritative meeting audio.
+    audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=8)
+    dropped_live_chunks = 0
 
     def audio_callback(indata, frames, time_info, status):
-        audio_queue.put(indata[:, 0].copy())
+        nonlocal dropped_live_chunks
+        chunk = indata[:, 0].copy()
+        if _put_latest_preview(audio_queue, chunk):
+            dropped_live_chunks += 1
 
     # --- Start recording (background) ---
     if recorder and audio_path:
@@ -213,6 +245,11 @@ def run_live_pipeline(
     click.echo("=" * 60)
     click.echo(f"⏱️  會議時長: {timedelta(seconds=int(duration))}")
     click.echo(f"📝 即時辨識句數: {line_count}")
+    if dropped_live_chunks:
+        click.echo(
+            f"⚠️  即時字幕處理落後，已略過 {dropped_live_chunks} 個預覽音訊區塊；完整錄音不受影響。",
+            err=True,
+        )
 
     if recorder:
         click.echo(f"💾 錄音已保存: {audio_path}")

@@ -10,6 +10,7 @@ echo "Building ownscribe-audio..."
 swiftc \
     -O \
     -o "$BIN_DIR/ownscribe-audio" \
+    -framework Accelerate \
     -framework ScreenCaptureKit \
     -framework CoreMedia \
     -framework AVFAudio \
