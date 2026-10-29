@@ -8,20 +8,28 @@ All-in-one flow:
 
 from __future__ import annotations
 
+import contextlib
+import multiprocessing as mp
 import os
 import queue
 import signal
 import tempfile
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import click
 import numpy as np
 
 from ownscribe.config import Config
 from ownscribe.transcription.utils import quiet_model_output
+
+_PREVIEW_START_TIMEOUT = 10.0
+_PREVIEW_STOP_TIMEOUT = 2.0
+_PREVIEW_TERMINATE_TIMEOUT = 2.0
 
 
 def _load_streaming_model(config: Config):
@@ -76,6 +84,159 @@ def _put_latest_preview(audio_queue: queue.Queue[np.ndarray], chunk: np.ndarray)
     except queue.Full:
         return True
     return dropped
+
+
+@dataclass
+class _PreviewCapture:
+    process: Any
+    audio_queue: Any
+    stop_event: Any
+    dropped_chunks: Any
+
+
+def _capture_preview_audio(
+    audio_queue,
+    status_connection,
+    stop_event,
+    dropped_chunks,
+    sample_rate: int,
+    chunk_stride: int,
+    mic_device: int | None,
+) -> None:
+    """Capture microphone chunks in a process that can be killed if CoreAudio deadlocks."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    audio_queue.cancel_join_thread()
+
+    def audio_callback(indata, frames, time_info, status):
+        chunk = indata[:, 0].copy()
+        if _put_latest_preview(audio_queue, chunk):
+            dropped_chunks.value += 1
+
+    try:
+        import sounddevice as sd
+
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            blocksize=chunk_stride,
+            device=mic_device,
+            callback=audio_callback,
+        ):
+            status_connection.send(None)
+            stop_event.wait()
+    except Exception as exc:
+        with contextlib.suppress(BrokenPipeError, OSError):
+            status_connection.send(f"{type(exc).__name__}: {exc}")
+    finally:
+        status_connection.close()
+
+
+def _stop_preview_process(process, stop_event, timeout: float = _PREVIEW_STOP_TIMEOUT) -> bool:
+    """Stop a preview worker within a bounded time, even if PortAudio is deadlocked."""
+    stop_event.set()
+    process.join(timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(_PREVIEW_TERMINATE_TIMEOUT)
+    if process.is_alive():
+        process.kill()
+        process.join(_PREVIEW_TERMINATE_TIMEOUT)
+    return not process.is_alive()
+
+
+def _close_preview_queue(audio_queue) -> None:
+    with contextlib.suppress(OSError, ValueError):
+        audio_queue.cancel_join_thread()
+        audio_queue.close()
+
+
+def _start_preview_capture(sample_rate: int, chunk_stride: int, mic_device: int | None) -> _PreviewCapture:
+    context = mp.get_context("spawn")
+    audio_queue = context.Queue(maxsize=8)
+    stop_event = context.Event()
+    dropped_chunks = context.Value("Q", 0, lock=False)
+    status_receiver, status_sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_capture_preview_audio,
+        args=(
+            audio_queue,
+            status_sender,
+            stop_event,
+            dropped_chunks,
+            sample_rate,
+            chunk_stride,
+            mic_device,
+        ),
+        name="ownscribe-live-preview",
+        daemon=True,
+    )
+
+    try:
+        process.start()
+    except Exception:
+        status_receiver.close()
+        status_sender.close()
+        _close_preview_queue(audio_queue)
+        raise
+    status_sender.close()
+
+    error: str | None
+    try:
+        if not status_receiver.poll(_PREVIEW_START_TIMEOUT):
+            error = "timed out while opening the microphone input"
+        else:
+            try:
+                error = status_receiver.recv()
+            except EOFError:
+                error = "preview worker exited before opening the microphone input"
+    except BaseException:
+        status_receiver.close()
+        _stop_preview_process(process, stop_event)
+        _close_preview_queue(audio_queue)
+        if not process.is_alive():
+            process.close()
+        raise
+    else:
+        status_receiver.close()
+
+    if error is not None:
+        _stop_preview_process(process, stop_event)
+        _close_preview_queue(audio_queue)
+        if not process.is_alive():
+            process.close()
+        raise RuntimeError(f"Unable to start live preview: {error}")
+
+    return _PreviewCapture(process, audio_queue, stop_event, dropped_chunks)
+
+
+def _stop_preview_capture(capture: _PreviewCapture) -> None:
+    stopped = False
+    error: Exception | None = None
+    try:
+        stopped = _stop_preview_process(capture.process, capture.stop_event)
+    except Exception as exc:
+        error = exc
+    finally:
+        _close_preview_queue(capture.audio_queue)
+
+    if stopped:
+        with contextlib.suppress(OSError, ValueError):
+            capture.process.close()
+        return
+
+    detail = f" ({error})" if error else ""
+    click.echo(f"⚠️  無法回收即時音訊預覽程序{detail}；錄音封存仍會繼續。", err=True)
+
+
+def _next_preview_chunk(capture: _PreviewCapture, timeout: float = 0.5) -> np.ndarray | None:
+    """Return the next chunk, or fail instead of waiting forever for a dead worker."""
+    try:
+        return capture.audio_queue.get(timeout=timeout)
+    except queue.Empty:
+        if not capture.process.is_alive():
+            raise RuntimeError("Live preview audio capture exited unexpectedly") from None
+        return None
 
 
 def run_live_pipeline(
@@ -142,24 +303,9 @@ def run_live_pipeline(
     chunk_stride = chunk_size[1] * 960  # 9600 samples @ 16kHz
     cache = {}
 
-    # --- Audio capture via sounddevice (for streaming preview) ---
-    import sounddevice as sd
-
-    # Live preview must not grow without bound when inference falls behind real time.
-    # Recording is handled independently, so dropping the oldest preview chunk keeps
-    # latency bounded without losing the authoritative meeting audio.
-    audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=8)
-    dropped_live_chunks = 0
-
-    def audio_callback(indata, frames, time_info, status):
-        nonlocal dropped_live_chunks
-        chunk = indata[:, 0].copy()
-        if _put_latest_preview(audio_queue, chunk):
-            dropped_live_chunks += 1
-
-    # --- Start recording (background) ---
-    if recorder and audio_path:
-        recorder.start(audio_path)
+    # PortAudio can deadlock in AudioOutputUnitStop after macOS sleep/wake. Keep it
+    # outside the main process so a stuck preview cannot block recording finalization.
+    preview = _start_preview_capture(sample_rate, chunk_stride, mic_device)
 
     # --- Main loop: live streaming ---
     start_time = time.time()
@@ -174,48 +320,42 @@ def run_live_pipeline(
     signal.signal(signal.SIGINT, on_interrupt)
 
     try:
-        with sd.InputStream(
-            samplerate=sample_rate,
-            channels=1,
-            dtype="float32",
-            blocksize=chunk_stride,
-            device=mic_device,
-            callback=audio_callback,
-        ):
-            while not stop_event.is_set():
-                try:
-                    chunk = audio_queue.get(timeout=0.5)
-                except queue.Empty:
-                    continue
+        if recorder and audio_path:
+            recorder.start(audio_path)
 
-                buffer = np.concatenate([buffer, chunk])
+        while not stop_event.is_set():
+            chunk = _next_preview_chunk(preview)
+            if chunk is None:
+                continue
+            buffer = np.concatenate([buffer, chunk])
 
-                while len(buffer) >= chunk_stride:
-                    audio_chunk = buffer[:chunk_stride]
-                    buffer = buffer[chunk_stride:]
+            while len(buffer) >= chunk_stride:
+                audio_chunk = buffer[:chunk_stride]
+                buffer = buffer[chunk_stride:]
 
-                    with quiet_model_output():
-                        res = streaming_model.generate(
-                            input=audio_chunk,
-                            cache=cache,
-                            is_final=False,
-                            chunk_size=chunk_size,
-                            encoder_chunk_look_back=4,
-                            decoder_chunk_look_back=1,
-                        )
+                with quiet_model_output():
+                    res = streaming_model.generate(
+                        input=audio_chunk,
+                        cache=cache,
+                        is_final=False,
+                        chunk_size=chunk_size,
+                        encoder_chunk_look_back=4,
+                        decoder_chunk_look_back=1,
+                    )
 
-                    if res and res[0] and res[0].get("text"):
-                        text = res[0]["text"].strip()
-                        if text:
-                            text = _to_trad(text)
-                            elapsed = time.time() - start_time
-                            ts = str(timedelta(seconds=int(elapsed)))
-                            click.echo(f"  [{ts}] {text}")
-                            line_count += 1
-
+                if res and res[0] and res[0].get("text"):
+                    text = res[0]["text"].strip()
+                    if text:
+                        text = _to_trad(text)
+                        elapsed = time.time() - start_time
+                        ts = str(timedelta(seconds=int(elapsed)))
+                        click.echo(f"  [{ts}] {text}")
+                        line_count += 1
     finally:
         signal.signal(signal.SIGINT, original_handler)
         try:
+            click.echo("\n⏳ 正在停止即時音訊預覽...")
+            _stop_preview_capture(preview)
             # Flush final chunk.
             if len(buffer) > 0:
                 with quiet_model_output():
@@ -237,9 +377,11 @@ def run_live_pipeline(
                         line_count += 1
         finally:
             if recorder:
+                click.echo("⏳ 正在完成錄音檔...")
                 recorder.stop()
 
     # --- Stop recording ---
+    dropped_live_chunks = preview.dropped_chunks.value
     duration = time.time() - start_time
     click.echo()
     click.echo("=" * 60)
